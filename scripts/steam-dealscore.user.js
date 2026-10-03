@@ -1,13 +1,13 @@
 // ==UserScript==
-// @name         Steam-Wunschliste – Deal-Score
+// @name         Steam Wishlist – Deal Score
 // @namespace    https://store.steampowered.com/wishlist/dealscore
-// @version      1.8.1
-// @description  Deal-Score (1–100) für Wunschliste, Warenkorb und Store-Seite
+// @version      1.9.0
+// @description  Deal score (1–100) for the wishlist, cart and store pages
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
 // @supportURL   https://github.com/JulWit/userscripts/issues
-// @updateURL    https://raw.githubusercontent.com/JulWit/userscripts/main/steam-dealscore.user.js
-// @downloadURL  https://raw.githubusercontent.com/JulWit/userscripts/main/steam-dealscore.user.js
+// @updateURL    https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/steam-dealscore.user.js
+// @downloadURL  https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/steam-dealscore.user.js
 // @match        https://store.steampowered.com/wishlist/*
 // @match        https://store.steampowered.com/cart*
 // @match        https://store.steampowered.com/app/*
@@ -23,28 +23,28 @@
 // ==/UserScript==
 
 /**
- * @fileoverview Zeigt auf der Steam-Wunschliste, im Einkaufswagen und auf der
- * Store-Seite eines Spiels vor jedem Titel einen Deal-Score von 1 bis 100.
- * Der Score ergibt sich aus Rezensionen, Rabatt, Preis und Beliebtheit.
- * Code-Stil: Google JavaScript Style Guide.
+ * @fileoverview Shows a deal score from 1 to 100 in front of every title on the
+ * Steam wishlist, in the cart and on a game's store page. The score is derived
+ * from reviews, discount, price and popularity.
+ * Code style: Google JavaScript Style Guide.
  */
 
 (function() {
   'use strict';
 
   // ===========================================================================
-  // Typen
+  // Types
   // ===========================================================================
 
   /**
-   * Rabatt in Prozent, Original- und Endpreis.
+   * Discount in percent, original and final price.
    * @typedef {{discount: number, original: number, final: number,
    *     free: boolean}}
    */
   let Price;
 
   /**
-   * Summen aus /appreviewhistogram: letzte 30 Tage und gesamt.
+   * Totals from /appreviewhistogram: last 30 days and all time.
    * @typedef {{up30: number, down30: number, upTotal: number,
    *     downTotal: number}}
    */
@@ -63,7 +63,7 @@
   let Settings;
 
   /**
-   * Zustand der Zusatzdaten für ein oder mehrere Spiele.
+   * State of the extra data for one or more games.
    * state: 'ok' | 'pending' | 'failed' | 'disabled'
    * @typedef {{state: string, hist: ?Histogram, t: (number|string),
    *     missing: (number|undefined)}}
@@ -71,15 +71,15 @@
   let Extra;
 
   /**
-   * Eintrag im Arbeitsspeicher-Cache. status: 'ok' | 'pending' | 'failed'
+   * In-memory cache entry. status: 'ok' | 'pending' | 'failed'
    * @typedef {{status: string, t: (number|undefined),
    *     hist: (?Histogram|undefined)}}
    */
   let HistEntry;
 
   /**
-   * Von einem Seiten-Adapter gelesener Eintrag. anchorEl ist der Knoten, vor
-   * dem das Badge eingefügt wird (Spieltitel).
+   * Entry read by a page adapter. anchorEl is the node the badge is inserted
+   * before (the game title).
    * @typedef {{
    *   key: string,
    *   kind: string,
@@ -95,7 +95,7 @@
   let ItemData;
 
   /**
-   * Ergebnis der Score-Berechnung. status: 'ok' | 'noPrice' | 'noWeights'
+   * Result of the score calculation. status: 'ok' | 'noPrice' | 'noWeights'
    * @typedef {{
    *   status: string,
    *   score: (number|undefined),
@@ -107,17 +107,17 @@
   let ScoreResult;
 
   /**
-   * Kaufoption auf der Store-Seite.
+   * Purchase option on the store page.
    * @typedef {{block: !Element, heading: !Element, price: !Price}}
    */
   let Offer;
 
   // ===========================================================================
-  // Konfiguration – alle Standardwerte an einer Stelle
+  // Configuration – all defaults in one place
   // ===========================================================================
 
   /**
-   * Friert ein Objekt samt verschachtelter Objekte und Arrays ein.
+   * Freezes an object including nested objects and arrays.
    * @param {T} value
    * @return {T}
    * @template T
@@ -132,58 +132,61 @@
   }
 
   const CONFIG = deepFreeze({
-    // Alternativ den GM-Wert "debug" auf true setzen.
+    // Alternatively set the GM value "debug" to true.
     debug: false,
 
-    // Standardgewichte (im Einstellungsdialog änderbar).
+    // Default weights (adjustable in the settings dialog).
     weights: {overall: 25, recent: 15, discount: 30, price: 20, popularity: 10},
-    // Bei diesem Endpreis (€) ergibt die Preis-Komponente 0,5.
+    // At this final price (€) the price component is 0.5.
     referencePrice: 20,
-    // Histogramm laden – einzige Quelle für alle Rezensionswerte.
+    // Load the histogram – the only source for all review values.
     fetchExtra: true,
-    // S · min(1, 0,5 + R)
+    // S · min(1, 0.5 + R)
     qualityPenalty: true,
 
-    // K: zieht die 30-Tage-Quote bei wenigen Rezensionen zur Gesamtbewertung.
+    // K: pulls the 30-day ratio towards the overall rating when there are few
+    // reviews.
     recentPrior: 50,
-    // B = log10(n + 1) / 5 → 100.000 Rezensionen = 1
+    // B = log10(n + 1) / 5 → 100,000 reviews = 1
     popularityLogScale: 5,
 
-    // Skalen der Komponenten (k = 1 entspricht einer strengen, linearen Skala).
-    // Rezensionen und Rabatt: 1 − (1 − x)^k. Rezensionen bleiben linear, damit
-    // sich gute Spiele unterscheiden und der Qualitäts-Malus wirkt; beim
-    // Rabatt ergeben 70 % mit k = 2 schon 0,91.
+    // Component scales (k = 1 is a strict, linear scale).
+    // Reviews and discount: 1 − (1 − x)^k. Reviews stay linear so that good
+    // games remain distinguishable and the quality penalty takes effect; for
+    // the discount, 70 % with k = 2 already yields 0.91.
     reviewCurve: 1,
     discountCurve: 2,
-    // Preis: 1 / (1 + (Endpreis / Referenzpreis)^k), mit k = 2 ergeben 5 €
-    // schon 0,94 und 10 € 0,80; der Referenzpreis ergibt weiterhin 0,5.
+    // Price: 1 / (1 + (final price / reference price)^k); with k = 2, €5
+    // already yields 0.94 and €10 yields 0.80; the reference price still
+    // yields 0.5.
     priceExponent: 2,
 
-    // Farbverlauf des Badges (stufenlos zwischen den Stopps).
+    // Badge color gradient (continuous between the stops).
     colorStops: [
-      {score: 30, color: '#d9443b'},  // rot
-      {score: 55, color: '#e8a530'},  // gelb/orange
-      {score: 80, color: '#4fae3f'},  // grün
+      {score: 30, color: '#d9443b'},  // red
+      {score: 55, color: '#e8a530'},  // yellow/orange
+      {score: 80, color: '#4fae3f'},  // green
     ],
-    // Badge ohne Score („…“, „–“).
+    // Badge without a score ("…", "–").
     neutralColor: '#3d4450',
 
     cacheTtlMs: 24 * 60 * 60 * 1000,
     failedRetryAfterMs: 5 * 60 * 1000,
     maxParallelRequests: 3,
-    // Bei 429 / 5xx; Wartezeit 2 s, 4 s, 8 s, 16 s.
+    // On 429 / 5xx; delays of 2 s, 4 s, 8 s, 16 s.
     maxRetries: 4,
     retryBaseDelayMs: 2000,
-    histogramQuery: '?l=german&review_score_preference=0',
+    histogramQuery: '?l=english&review_score_preference=0',
   });
 
-  // Sprachabhängige Muster und Formate – gesammelt an einer Stelle.
+  // Locale-dependent patterns and formats – collected in one place. The
+  // patterns match Steam's page text, which depends on the store language.
   const TEXT = deepFreeze({
-    locale: 'de-DE',
+    locale: 'en-US',
     currencyCode: 'EUR',
     currency: /[€$£¥₩₽₹]|\b(?:EUR|USD|GBP|CHF|PLN|zł|kr)\b/,
     discountText: /^[-−–]\s*(\d{1,3})\s*%$/,
-    free: /^(?:kostenlos(?: spielbar| spielen)?|free(?: to play)?|gratis)$/i,
+    free: /^(?:free(?: to play)?|gratis|kostenlos(?: spielbar| spielen)?)$/i,
   });
 
   const PREFIX = 'sws';
@@ -192,18 +195,18 @@
   const OWN_SELECTOR = `.${PREFIX}-badge, .${PREFIX}-dialog`;
 
   // ===========================================================================
-  // Reine Funktionen: Parsing, Score, Farbe, Tooltip (ohne DOM und Netzwerk)
+  // Pure functions: parsing, score, color, tooltip (no DOM, no network)
   // ===========================================================================
 
   /**
-   * Zahlen mit Tausender-/Dezimaltrennern, auch mit geschützten Leerzeichen.
-   * Kein Flag g: wird nur über matchAll bzw. match verwendet.
+   * Numbers with thousands/decimal separators, including non-breaking spaces.
+   * No g flag: only used via matchAll or match.
    */
-  const NUMBER_PATTERN = /\d[\d.,\u00a0\u202f']*/;
+  const NUMBER_PATTERN = /\d[\d.,  ']*/;
 
   /**
    * @param {number} x
-   * @return {number} x, begrenzt auf 0…1.
+   * @return {number} x, clamped to 0…1.
    */
   function clamp01(x) {
     return Math.min(1, Math.max(0, x));
@@ -211,7 +214,7 @@
 
   /**
    * @param {string} text
-   * @return {!Array<string>} Alle Zahlen im Text, in Reihenfolge.
+   * @return {!Array<string>} All numbers in the text, in order.
    */
   function findNumbers(text) {
     const pattern = new RegExp(NUMBER_PATTERN.source, 'g');
@@ -219,7 +222,7 @@
   }
 
   /**
-   * „1.234,56€“, „25,59 €“, „€12.99“, „25,--€“ → Zahl.
+   * "1.234,56€", "25,59 €", "€12.99", "25,--€" → number.
    * @param {*} text
    * @return {?number}
    */
@@ -227,7 +230,7 @@
     const match = String(text ?? '').match(NUMBER_PATTERN);
     if (!match) return null;
     const digits =
-        match[0].replace(/[\u00a0\u202f']/g, '').replace(/[.,]+$/, '');
+        match[0].replace(/[  ']/g, '').replace(/[.,]+$/, '');
     const sep = Math.max(digits.lastIndexOf(','), digits.lastIndexOf('.'));
     if (sep >= 0 && digits.length - sep - 1 === 2) {
       const whole = digits.slice(0, sep).replace(/[.,]/g, '');
@@ -237,7 +240,7 @@
   }
 
   /**
-   * „20 % Rabatt. Regulärer Preis 31,99€ reduziert auf 25,59€.“
+   * Localized label such as "20% off. Regular price €31.99, now €25.59."
    * @param {?string} label
    * @return {?Price}
    */
@@ -260,8 +263,8 @@
   }
 
   /**
-   * Sichtbare Texte des Preisbereichs: „-20%“, „31,99€“, „25,59€“ bzw.
-   * „19,50€“ oder „Kostenlos“.
+   * Visible texts of the price area: "-20%", "31,99€", "25,59€" or
+   * "19,50€" or "Free".
    * @param {!Array<string>} texts
    * @return {?Price}
    */
@@ -296,13 +299,13 @@
   }
 
   /**
-   * Fasst die Antwort von /appreviewhistogram zu Summen zusammen.
+   * Sums up the /appreviewhistogram response.
    * @param {*} json
    * @return {!Histogram}
    */
   function summarizeHistogram(json) {
     if (!json || json.success !== 1 || !json.results) {
-      throw new Error('Histogramm: unerwartete Antwort');
+      throw new Error('Histogram: unexpected response');
     }
     const sum = (list) => (Array.isArray(list) ? list : []).reduce(
         (acc, day) => [
@@ -316,8 +319,8 @@
   }
 
   /**
-   * Bundles: Rezensionen aller enthaltenen Spiele zusammenzählen, sodass
-   * Spiele mit vielen Rezensionen stärker zählen.
+   * Bundles: add up the reviews of all included games, so games with many
+   * reviews count more.
    * @param {!Array<!Histogram>} list
    * @return {!Histogram}
    */
@@ -333,9 +336,9 @@
   }
 
   /**
-   * SteamDB-Formel: Bei wenigen Rezensionen geht die Bewertung Richtung 50 %.
-   * @param {number} pct Anteil positiv (0–1).
-   * @param {number} count Anzahl der Rezensionen.
+   * SteamDB formula: with few reviews the rating tends towards 50 %.
+   * @param {number} pct Share of positive reviews (0–1).
+   * @param {number} count Number of reviews.
    * @return {number}
    */
   function shrinkRating(pct, count) {
@@ -343,10 +346,10 @@
   }
 
   /**
-   * Gewölbte Skala 1 − (1 − x)^k: hohe Werte zählen fast voll, die Abstufung
-   * bleibt erhalten. k = 1 ist linear.
-   * @param {number} x Linearer Wert (0–1).
-   * @param {number} k Wölbung (≥ 1).
+   * Curved scale 1 − (1 − x)^k: high values count almost fully, while the
+   * gradation is preserved. k = 1 is linear.
+   * @param {number} x Linear value (0–1).
+   * @param {number} k Curvature (≥ 1).
    * @return {number}
    */
   function easeOut(x, k) {
@@ -354,11 +357,11 @@
   }
 
   /**
-   * Preis-Skala: 1 / (1 + (Endpreis / Referenzpreis)^k). Der Referenzpreis
-   * ergibt 0,5; kostenlos ergibt 1.
-   * @param {number} price Endpreis.
+   * Price scale: 1 / (1 + (final price / reference price)^k). The reference
+   * price yields 0.5; free yields 1.
+   * @param {number} price Final price.
    * @param {number} referencePrice
-   * @param {number} k Steilheit (1 = bisherige, flache Kurve).
+   * @param {number} k Steepness (1 = the previous, flat curve).
    * @return {number}
    */
   function priceValue(price, referencePrice, k) {
@@ -367,9 +370,9 @@
   }
 
   /**
-   * Berechnet den Deal-Score eines Eintrags. Auf allen Seiten gilt dieselbe
-   * Regel: Preis und Rabatt kommen von der Seite, alle Rezensionswerte
-   * ausschließlich aus dem Histogramm (alle Sprachen).
+   * Computes the deal score of an entry. The same rule applies on every page:
+   * price and discount come from the page, all review values exclusively from
+   * the histogram (all languages).
    * @param {{price: ?Price}} row
    * @param {?Histogram} hist
    * @param {!Settings} settings
@@ -456,7 +459,7 @@
   }
 
   /**
-   * @param {string} hex Farbe als „#rgb“ oder „#rrggbb“.
+   * @param {string} hex Color as "#rgb" or "#rrggbb".
    * @return {!Array<number>} [r, g, b]
    */
   function hexToRgb(hex) {
@@ -467,10 +470,10 @@
   }
 
   /**
-   * Stufenloser Farbverlauf über die Farbstopps.
+   * Continuous color gradient across the color stops.
    * @param {number} score
    * @param {!Array<{score: number, color: string}>=} stops
-   * @return {string} CSS-Farbe.
+   * @return {string} CSS color.
    */
   function scoreColor(score, stops = CONFIG.colorStops) {
     const sorted = [...stops].sort((a, b) => a.score - b.score);
@@ -495,23 +498,23 @@
 
   /**
    * @param {number} value
-   * @return {string} Ganzzahl mit Tausendertrennzeichen.
+   * @return {string} Integer with thousands separators.
    */
   function formatInteger(value) {
     return Math.round(value).toLocaleString(TEXT.locale);
   }
 
   /**
-   * @param {number} ratio Anteil (0–1).
-   * @return {string} z. B. „93 %“.
+   * @param {number} ratio Share (0–1).
+   * @return {string} e.g. "93%".
    */
   function formatPercent(ratio) {
-    return `${Math.round(ratio * 100)} %`;
+    return `${Math.round(ratio * 100)}%`;
   }
 
   /**
    * @param {number} value
-   * @return {string} z. B. „7,49 €“.
+   * @return {string} e.g. "€7.49".
    */
   function formatMoney(value) {
     return value.toLocaleString(
@@ -520,7 +523,7 @@
 
   /**
    * @param {number} value
-   * @param {number} digits Nachkommastellen.
+   * @param {number} digits Decimal places.
    * @return {string}
    */
   function formatDecimal(value, digits) {
@@ -531,96 +534,95 @@
   }
 
   /**
-   * Baut den mehrzeiligen Tooltip mit der Aufschlüsselung.
+   * Builds the multi-line tooltip with the breakdown.
    * @param {!ScoreResult} result
    * @param {string} extraState 'ok' | 'pending' | 'failed' | 'disabled'
    * @param {{bundleSize: (number|undefined), bundleMissing: (number|undefined),
-   *     notes: (!Array<string>|undefined)}=} meta Bundle-Angaben und
-   *     zusätzliche Zeilen.
+   *     notes: (!Array<string>|undefined)}=} meta Bundle details and
+   *     additional lines.
    * @return {string}
    */
   function buildTooltip(result, extraState, meta = {}) {
     if (result.status === 'noPrice') {
-      return 'Deal-Score: –\n' +
-          'Kein Preis verfügbar (unveröffentlicht oder nicht kaufbar).';
+      return 'Deal score: –\n' +
+          'No price available (unreleased or not purchasable).';
     }
     if (extraState === 'pending') {
-      return 'Deal-Score: Zusatzdaten werden geladen …';
+      return 'Deal score: loading extra data …';
     }
     if (result.status === 'noWeights') {
-      return 'Deal-Score: –\nAlle Gewichte der verfügbaren Komponenten sind 0.';
+      return 'Deal score: –\nAll weights of the available components are 0.';
     }
     const parts = result.parts;
     const points = (part) => Math.round(part.value * 100);
-    const weight = (part) => ` · Gewicht ${formatInteger(part.weight)}`;
+    const weight = (part) => ` · weight ${formatInteger(part.weight)}`;
     const rated = (part) => `→ ${points(part)}${weight(part)}`;
-    const lines = [`Deal-Score ${result.score}/100`];
+    const lines = [`Deal score ${result.score}/100`];
 
     const overall = parts.overall;
     if (overall.available) {
-      lines.push(`Gesamtbewertung: ${formatPercent(overall.pct)} ` +
-          `(${formatInteger(overall.n)}, alle Sprachen) ${rated(overall)}`);
+      lines.push(`Overall rating: ${formatPercent(overall.pct)} ` +
+          `(${formatInteger(overall.n)}, all languages) ${rated(overall)}`);
     } else {
-      lines.push('Gesamtbewertung: keine Daten (nicht gewertet)');
+      lines.push('Overall rating: no data (not counted)');
     }
 
     const recent = parts.recent;
     if (!recent.available) {
-      lines.push('Letzte 30 Tage: keine Daten (nicht gewertet)');
+      lines.push('Last 30 days: no data (not counted)');
     } else if (!recent.n) {
-      lines.push(`Letzte 30 Tage: keine neuen Rezensionen ${rated(recent)}`);
+      lines.push(`Last 30 days: no new reviews ${rated(recent)}`);
     } else {
-      lines.push(`Letzte 30 Tage: ${formatPercent(recent.pct)} ` +
+      lines.push(`Last 30 days: ${formatPercent(recent.pct)} ` +
           `(${formatInteger(recent.n)}) ${rated(recent)}`);
     }
 
     const discount = parts.discount;
     lines.push(discount.pct > 0 ?
-        `Rabatt: −${discount.pct} % ${rated(discount)}` :
-        `Rabatt: keiner → 0${weight(discount)}`);
+        `Discount: −${discount.pct}% ${rated(discount)}` :
+        `Discount: none → 0${weight(discount)}`);
 
     const price = parts.price;
-    const priceText = price.free ? 'kostenlos' : formatMoney(price.amount);
-    lines.push(`Preis: ${priceText} ${rated(price)}`);
+    const priceText = price.free ? 'free' : formatMoney(price.amount);
+    lines.push(`Price: ${priceText} ${rated(price)}`);
 
     const popularity = parts.popularity;
     lines.push(popularity.available ?
-        `Beliebtheit: ${formatInteger(popularity.n)} Rezensionen ` +
+        `Popularity: ${formatInteger(popularity.n)} reviews ` +
             rated(popularity) :
-        'Beliebtheit: keine Daten (nicht gewertet)');
+        'Popularity: no data (not counted)');
 
     if (result.penalty < 1) {
-      lines.push(`Qualitäts-Malus: × ${formatDecimal(result.penalty, 2)}`);
+      lines.push(`Quality penalty: × ${formatDecimal(result.penalty, 2)}`);
     }
     lines.push(...(meta.notes || []));
     if (meta.bundleSize) {
-      const noun = meta.bundleSize === 1 ? 'Titel' : 'Titeln';
-      lines.push(`Bundle: Rezensionen von ${meta.bundleSize} enthaltenen ` +
-          `${noun} zusammengefasst.`);
+      const noun = meta.bundleSize === 1 ? 'title' : 'titles';
+      lines.push(`Bundle: reviews of ${meta.bundleSize} included ` +
+          `${noun} combined.`);
       if (meta.bundleMissing) {
-        lines.push(`Hinweis: Für ${meta.bundleMissing} enthaltene Titel ` +
-            'fehlen Zusatzdaten.');
+        lines.push(`Note: extra data is missing for ${meta.bundleMissing} ` +
+            'included titles.');
       }
     }
     if (extraState === 'failed') {
-      lines.push('Hinweis: Rezensionsdaten nicht abrufbar – ' +
-          'Score nur aus Rabatt und Preis.');
+      lines.push('Note: review data unavailable – ' +
+          'score based on discount and price only.');
     } else if (extraState === 'disabled') {
-      lines.push('Hinweis: Zusatzdaten deaktiviert – ' +
-          'Score nur aus Rabatt und Preis.');
+      lines.push('Note: extra data disabled – ' +
+          'score based on discount and price only.');
     } else if (!result.hasReviews) {
-      lines.push(
-          'Hinweis: Noch keine Rezensionen – Bewertung fließt nicht ein.');
+      lines.push('Note: no reviews yet – rating is not counted.');
     }
     return lines.join('\n');
   }
 
   // ===========================================================================
-  // Skript-Manager, Einstellungen & Cache (GM-Storage)
+  // Script manager, settings & cache (GM storage)
   // ===========================================================================
 
-  // Die Manager stellen GM_* als lokale Bezeichner bereit, nicht zwingend als
-  // window-Eigenschaften.
+  // Script managers provide GM_* as local identifiers, not necessarily as
+  // window properties.
   /* global GM_getValue, GM_setValue, GM_deleteValue, GM_listValues,
      GM_registerMenuCommand, GM_xmlhttpRequest */
   const GM_API = Object.freeze({
@@ -656,18 +658,18 @@
     try {
       if (GM_API.setValue) GM_API.setValue(key, value);
     } catch (e) {
-      log('GM_setValue fehlgeschlagen', e);
+      log('GM_setValue failed', e);
     }
   }
 
   const DEBUG = CONFIG.debug || gmGet('debug', false) === true;
 
   /**
-   * Debug-Ausgabe, nur wenn DEBUG gesetzt ist.
+   * Debug output, only when DEBUG is set.
    * @param {...*} args
    */
   function log(...args) {
-    if (DEBUG) console.log('[Deal-Score]', ...args);
+    if (DEBUG) console.log('[Deal Score]', ...args);
   }
 
   /** @return {!Settings} */
@@ -681,7 +683,7 @@
   }
 
   /**
-   * Prüft gespeicherte bzw. eingegebene Werte; Ungültiges wird ersetzt.
+   * Validates stored or entered values; invalid ones are replaced.
    * @param {?Object} raw
    * @return {!Settings}
    */
@@ -715,7 +717,7 @@
 
   /**
    * @param {string} appid
-   * @return {?Histogram} Gecachte Summen, wenn noch gültig.
+   * @return {?Histogram} Cached totals, if still valid.
    */
   function cacheRead(appid) {
     const entry = gmGet(STORAGE_CACHE_PREFIX + appid, null);
@@ -733,9 +735,9 @@
   }
 
   /**
-   * Löscht abgelaufene bzw. alle Cache-Einträge.
-   * @param {boolean} all true: alle Einträge löschen.
-   * @return {number} Anzahl gelöschter Einträge.
+   * Deletes expired or all cache entries.
+   * @param {boolean} all true: delete all entries.
+   * @return {number} Number of deleted entries.
    */
   function cachePrune(all) {
     if (!GM_API.listValues || !GM_API.deleteValue) return 0;
@@ -752,13 +754,13 @@
         }
       }
     } catch (e) {
-      log('Cache aufräumen fehlgeschlagen', e);
+      log('Cache pruning failed', e);
     }
     return removed;
   }
 
   // ===========================================================================
-  // Netzwerk: Warteschlange mit max. 3 parallelen Anfragen, Backoff bei 429/5xx
+  // Network: queue with max. 3 parallel requests, backoff on 429/5xx
   // ===========================================================================
 
   /** @type {!Map<string, !HistEntry>} */
@@ -781,8 +783,7 @@
   }
 
   /**
-   * GET über den Skript-Manager (Fallback, falls fetch in der Sandbox
-   * scheitert).
+   * GET via the script manager (fallback in case fetch fails in the sandbox).
    * @param {string} url
    * @return {!Promise<{status: number, text: function(): string}>}
    */
@@ -796,8 +797,8 @@
           status: response.status,
           text: () => response.responseText,
         }),
-        onerror: () => reject(new Error('GM_xmlhttpRequest fehlgeschlagen')),
-        ontimeout: () => reject(new Error('GM_xmlhttpRequest Timeout')),
+        onerror: () => reject(new Error('GM_xmlhttpRequest failed')),
+        ontimeout: () => reject(new Error('GM_xmlhttpRequest timeout')),
         timeout: 20000,
       });
     });
@@ -816,14 +817,14 @@
       });
       return {status: response.status, text: () => response.text()};
     } catch (e) {
-      // Netzwerk-/Sandbox-Fehler von fetch → Fallback über den Skript-Manager.
+      // Network/sandbox error from fetch → fall back to the script manager.
       if (GM_API.xmlhttpRequest) return gmRequest(url);
       throw e;
     }
   }
 
   /**
-   * Lädt das Rezensions-Histogramm, mit Backoff bei 429 und 5xx.
+   * Loads the review histogram, with backoff on 429 and 5xx.
    * @param {string} appid
    * @return {!Promise<!Histogram>}
    */
@@ -841,8 +842,8 @@
         if (status === 429) {
           pausedUntil = Math.max(pausedUntil, Date.now() + delay);
         }
-        log(`HTTP ${status} für ${appid}, ` +
-            `neuer Versuch in ${Math.round(delay)} ms`);
+        log(`HTTP ${status} for ${appid}, ` +
+            `retrying in ${Math.round(delay)} ms`);
         await sleep(delay);
         continue;
       }
@@ -853,7 +854,7 @@
 
   /**
    * @param {string} appid
-   * @return {boolean} Ob ein Badge für dieses Spiel gerendert ist.
+   * @return {boolean} Whether a badge is rendered for this game.
    */
   function isRendered(appid) {
     const selector = `.${PREFIX}-badge[data-appids~="${appid}"]`;
@@ -874,7 +875,7 @@
     if (histMem.get(appid)?.status === 'pending') histMem.delete(appid);
   }
 
-  /** Startet Anfragen, solange Plätze frei sind. */
+  /** Starts requests while slots are free. */
   function pump() {
     if (!settings.fetchExtra) {
       queue.splice(0).forEach(dropFromQueue);
@@ -892,7 +893,7 @@
     }
     while (activeRequests < CONFIG.maxParallelRequests && queue.length) {
       const appid = queue.shift();
-      // Nur Spiele abfragen, die (noch) gerendert sind.
+      // Only request games that are (still) rendered.
       if (!isRendered(appid)) {
         dropFromQueue(appid);
         continue;
@@ -902,11 +903,11 @@
           .then((hist) => {
             cacheWrite(appid, hist);
             histMem.set(appid, {status: 'ok', t: Date.now(), hist});
-            log('Histogramm', appid, hist);
+            log('Histogram', appid, hist);
           })
           .catch((e) => {
             histMem.set(appid, {status: 'failed', t: Date.now()});
-            log('Histogramm fehlgeschlagen', appid, e);
+            log('Histogram failed', appid, e);
           })
           .finally(() => {
             activeRequests--;
@@ -918,7 +919,7 @@
   }
 
   /**
-   * Liefert den Zustand der Zusatzdaten und stößt bei Bedarf den Abruf an.
+   * Returns the state of the extra data and triggers the fetch if needed.
    * @param {string} appid
    * @return {!Extra}
    */
@@ -952,8 +953,7 @@
   }
 
   /**
-   * Wie getExtra, für mehrere AppIDs (Bundles): Histogramme werden
-   * zusammengefasst.
+   * Like getExtra, for multiple app IDs (bundles): histograms are combined.
    * @param {!Array<string>} appids
    * @return {!Extra}
    */
@@ -976,12 +976,12 @@
   }
 
   // ===========================================================================
-  // DOM-Helfer
+  // DOM helpers
   // ===========================================================================
 
   /**
    * @param {!Element} anchor
-   * @return {?string} AppID aus dem Link.
+   * @return {?string} App ID from the link.
    */
   function appIdOf(anchor) {
     const href = anchor.getAttribute('href') || '';
@@ -990,7 +990,7 @@
 
   /**
    * @param {!Element} element
-   * @return {boolean} Ob das Element zu unseren Badges oder dem Dialog gehört.
+   * @return {boolean} Whether the element belongs to our badges or the dialog.
    */
   function isOwn(element) {
     return Boolean(element.closest(OWN_SELECTOR));
@@ -1006,9 +1006,9 @@
   }
 
   /**
-   * Texte aller Blattelemente, ohne Schaltflächen und eigene Elemente.
+   * Texts of all leaf elements, excluding buttons and our own elements.
    * @param {!Element} scope
-   * @param {?Element=} exclude Dieses Element (samt Inhalt) auslassen.
+   * @param {?Element=} exclude Skip this element (including its content).
    * @return {!Array<string>}
    */
   function leafTexts(scope, exclude = null) {
@@ -1023,10 +1023,11 @@
   }
 
   /**
-   * Liest den Preis: zuerst ein aria-label mit Rabatt, sonst sichtbare Texte.
+   * Reads the price: first an aria-label with a discount, otherwise visible
+   * texts.
    * @param {!Element} item
-   * @param {!Array<!Element>} priceLinks Bevorzugt durchsuchte Preis-Links.
-   * @param {?Element} exclude Element, das keinen Preis enthält (Titel).
+   * @param {!Array<!Element>} priceLinks Price links searched first.
+   * @param {?Element} exclude Element that contains no price (the title).
    * @return {?Price}
    */
   function readPrice(item, priceLinks, exclude) {
@@ -1042,7 +1043,7 @@
 
   /**
    * @param {!Array<!Element>} nodes
-   * @return {!Element} Kleinster gemeinsamer Vorfahre.
+   * @return {!Element} Lowest common ancestor.
    */
   function commonAncestor(nodes) {
     let ancestor = nodes[0].parentElement;
@@ -1053,23 +1054,23 @@
   }
 
   // ===========================================================================
-  // Seiten-Adapter: findItems, listRootOf, readItem
+  // Page adapters: findItems, listRootOf, readItem
   // ===========================================================================
 
   /**
-   * Gemeinsame Schnittstelle der Seiten-Adapter.
+   * Common interface of the page adapters.
    * @interface
    */
   class PageAdapter {
     /**
      * @param {!Element|!Document} root
-     * @return {!Array<!Element>} Alle Einträge unterhalb von root.
+     * @return {!Array<!Element>} All entries below root.
      */
     findItems(root) {}
 
     /**
      * @param {!Array<!Element>} items
-     * @return {!Element} Element, das alle Einträge enthält.
+     * @return {!Element} Element that contains all entries.
      */
     listRootOf(items) {}
 
@@ -1081,7 +1082,7 @@
   }
 
   /**
-   * Wunschliste: virtualisierte React-Liste, je Zeile ein div[data-index].
+   * Wishlist: virtualized React list, one div[data-index] per row.
    * @implements {PageAdapter}
    */
   class WishlistPage {
@@ -1135,18 +1136,18 @@
     }
   }
 
-  /** Kopf-Link einer Warenkorb-Position: App, Bundle oder Paket. */
+  /** Head link of a cart item: app, bundle or package. */
   const CART_HEAD_SELECTOR =
       'a[href*="/app/"], a[href*="/bundle/"], a[href*="/sub/"]';
 
   /**
-   * Einkaufswagen: Kopf-Link mit Bild, Titel als eigenes Element.
+   * Cart: head link with an image, title as a separate element.
    * @implements {PageAdapter}
    */
   class CartPage {
     /**
      * @param {!Element|!Document} scope
-     * @return {!Array<!Element>} Kopf-Links mit Bild.
+     * @return {!Array<!Element>} Head links with an image.
      */
     heads(scope) {
       return [...scope.querySelectorAll(CART_HEAD_SELECTOR)].filter(
@@ -1155,7 +1156,7 @@
 
     /**
      * @param {!Element} head
-     * @return {!Element} Größter Vorfahre, der nur diese Position enthält.
+     * @return {!Element} Largest ancestor that contains only this item.
      */
     itemRoot(head) {
       const button = head.closest('[role="button"]');
@@ -1174,8 +1175,8 @@
      * @return {!Array<!Element>}
      */
     findItems(root) {
-      // Nur echte Positionen: Sie haben Add/Remove-Schaltflächen mit
-      // aria-labelledby (Empfehlungen o. Ä. nicht).
+      // Only real cart items: they have add/remove buttons with
+      // aria-labelledby (recommendations and the like do not).
       const roots =
           new Set(this.heads(root).map((head) => this.itemRoot(head)));
       return [...roots].filter(
@@ -1192,7 +1193,7 @@
 
     /**
      * @param {!Element} item
-     * @param {string|undefined} name Erwarteter Titel (alt-Text des Bildes).
+     * @param {string|undefined} name Expected title (alt text of the image).
      * @return {?Element}
      */
     findTitle(item, name) {
@@ -1204,8 +1205,8 @@
           }
         }
       }
-      // Fallback: Add/Remove-Schaltflächen verweisen per aria-labelledby auf
-      // den Titel.
+      // Fallback: add/remove buttons reference the title via
+      // aria-labelledby.
       for (const button of item.querySelectorAll('[aria-labelledby]')) {
         const ids = button.getAttribute('aria-labelledby').trim().split(/\s+/);
         const element = document.getElementById(ids[ids.length - 1]);
@@ -1250,23 +1251,23 @@
     }
   }
 
-  /** Desktop-Titel und responsiver Titel (#appHubAppName_responsive). */
+  /** Desktop title and responsive title (#appHubAppName_responsive). */
   const STORE_TITLE_SELECTOR = '.apphub_AppName';
 
   /**
-   * Store-Seite eines Spiels: klassisches Server-HTML mit stabilen Klassen und
-   * Datenattributen.
+   * Store page of a game: classic server-rendered HTML with stable classes and
+   * data attributes.
    * @implements {PageAdapter}
    */
   class StorePage {
-    /** @return {?string} AppID aus der URL. */
+    /** @return {?string} App ID from the URL. */
     appid() {
       return location.pathname.match(/^\/app\/(\d+)/)?.[1] || null;
     }
 
     /**
-     * Kaufoptionen dieses Spiels mit Preis (Editionen/Pakete); Bundles mit
-     * fremden Spielen zählen nicht.
+     * Purchase options of this game with a price (editions/packages); bundles
+     * with other games do not count.
      * @param {!Element|!Document} scope
      * @return {!Array<!Offer>}
      */
@@ -1283,7 +1284,7 @@
 
     /**
      * @param {!Element} block
-     * @return {?Element} Überschrift der Kaufbox.
+     * @return {?Element} Heading of the purchase box.
      */
     heading(block) {
       const id = block.getAttribute('aria-labelledby');
@@ -1295,7 +1296,7 @@
 
     /**
      * @param {!Element} element
-     * @return {?Node} Erster Kindknoten, der nicht unser Badge ist.
+     * @return {?Node} First child node that is not our badge.
      */
     firstChild(element) {
       return [...element.childNodes].find((node) => !isOwnNode(node)) || null;
@@ -1303,7 +1304,7 @@
 
     /**
      * @param {!Element} element
-     * @return {string} Text ohne unser Badge.
+     * @return {string} Text without our badge.
      */
     ownText(element) {
       return [...element.childNodes]
@@ -1320,7 +1321,7 @@
     findItems(root) {
       const items = [...root.querySelectorAll(STORE_TITLE_SELECTOR)];
       const offers = this.offers(root);
-      // Eigene Badges in den Kaufboxen nur bei mehreren Editionen.
+      // Separate badges in the purchase boxes only with multiple editions.
       if (offers.length > 1) items.push(...offers.map((offer) => offer.block));
       return items;
     }
@@ -1357,7 +1358,7 @@
           price: main ? main.price : null,
           bundleSize: 0,
           notes: offers.length > 1 ?
-              [`Angebot: ${this.ownText(main.heading)}`] :
+              [`Offer: ${this.ownText(main.heading)}`] :
               [],
         };
       }
@@ -1380,7 +1381,7 @@
     }
   }
 
-  /** @return {!PageAdapter} Adapter für diese Seite. */
+  /** @return {!PageAdapter} Adapter for this page. */
   function createPageAdapter() {
     if (/^\/cart(?:\/|$)/.test(location.pathname)) return new CartPage();
     if (/^\/app\/\d+/.test(location.pathname)) return new StorePage();
@@ -1390,7 +1391,7 @@
   const page = createPageAdapter();
 
   // ===========================================================================
-  // Badges (React-Knoten werden nie verändert, nur eigene Elemente eingefügt)
+  // Badges (React nodes are never modified, only our own elements inserted)
   // ===========================================================================
 
   /** @return {!Element} */
@@ -1418,16 +1419,16 @@
     let color = null;
     if (result.status === 'noPrice') {
       text = '–';
-      label = 'Deal-Score nicht verfügbar';
+      label = 'Deal score unavailable';
     } else if (extra.state === 'pending') {
       text = '…';
-      label = 'Deal-Score wird berechnet';
+      label = 'Calculating deal score';
     } else if (result.status !== 'ok') {
       text = '–';
-      label = 'Deal-Score nicht verfügbar';
+      label = 'Deal score unavailable';
     } else {
       text = String(result.score);
-      label = `Deal-Score ${result.score} von 100`;
+      label = `Deal score ${result.score} out of 100`;
       color = scoreColor(result.score);
     }
     pill.textContent = text;
@@ -1445,10 +1446,10 @@
   }
 
   /**
-   * Setzt bzw. entfernt ein data-Attribut, nur wenn es sich ändert.
+   * Sets or removes a data attribute, only if it changes.
    * @param {!HTMLElement} element
    * @param {string} name
-   * @param {?string} value null entfernt das Attribut.
+   * @param {?string} value null removes the attribute.
    */
   function setData(element, name, value) {
     if (value == null) {
@@ -1459,9 +1460,9 @@
   }
 
   /**
-   * Fügt das Badge eines Eintrags ein bzw. aktualisiert es (idempotent).
+   * Inserts or updates the badge of an entry (idempotent).
    * @param {!Element} item
-   * @param {?Array<!Object>} report Sammelt Debug-Zeilen, sonst null.
+   * @param {?Array<!Object>} report Collects debug rows, otherwise null.
    */
   function processItem(item, report) {
     const data = page.readItem(item);
@@ -1469,7 +1470,7 @@
     const anchor = data.anchorEl;
 
     const badges = item.querySelectorAll(`.${PREFIX}-badge`);
-    // Doppelte Badges entfernen (nur eigene Elemente).
+    // Remove duplicate badges (our own elements only).
     for (let i = 1; i < badges.length; i++) {
       badges[i].remove();
     }
@@ -1482,7 +1483,7 @@
       delete badge.dataset.sig;
     }
     setData(badge, 'appid', data.kind === 'app' ? data.id : null);
-    // Vor getExtraFor setzen: Die Warteschlange prüft darauf.
+    // Set before getExtraFor: the queue checks for it.
     setData(badge, 'appids', data.appids.join(' '));
 
     const extra = getExtraFor(data.appids);
@@ -1523,14 +1524,14 @@
       try {
         processItem(item, report);
       } catch (e) {
-        console.error('[Deal-Score] Fehler in Zeile', item, e);
+        console.error('[Deal Score] Error in row', item, e);
       }
     }
     if (report && report.length) console.table(report);
   }
 
   // ===========================================================================
-  // Beobachtung der Liste
+  // Observing the list
   // ===========================================================================
 
   /** @type {?Element} */
@@ -1541,7 +1542,7 @@
 
   /**
    * @param {!MutationRecord} record
-   * @return {boolean} Ob die Änderung nur unsere eigenen Elemente betrifft.
+   * @return {boolean} Whether the change only affects our own elements.
    */
   function isOwnMutation(record) {
     const target = record.target.nodeType === Node.ELEMENT_NODE ?
@@ -1571,10 +1572,10 @@
       attributeFilter: ['href', 'title', 'aria-label'],
     });
     observed = target;
-    log('Beobachte', target === document.body ? 'body' : 'Liste');
+    log('Observing', target === document.body ? 'body' : 'list');
   }
 
-  /** Bündelt die Verarbeitung per requestAnimationFrame. */
+  /** Batches processing via requestAnimationFrame. */
   function schedule() {
     if (frameRequested) return;
     frameRequested = true;
@@ -1584,7 +1585,7 @@
     });
   }
 
-  /** Sucht die Liste, beobachtet sie und verarbeitet alle Einträge. */
+  /** Finds the list, observes it and processes all entries. */
   function tick() {
     if (!listRoot || !listRoot.isConnected) {
       const items = page.findItems(document);
@@ -1595,10 +1596,10 @@
   }
 
   // ===========================================================================
-  // Styles & Einstellungsdialog
+  // Styles & settings dialog
   // ===========================================================================
 
-  /** Fügt die Styles einmalig ein. */
+  /** Injects the styles once. */
   function injectStyles() {
     if (document.getElementById(`${PREFIX}-style`)) return;
     const style = document.createElement('style');
@@ -1714,20 +1715,20 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  /** Gewichte im Dialog: [Schlüssel, Beschriftung]. */
+  /** Weights in the dialog: [key, label]. */
   const WEIGHT_FIELDS = deepFreeze([
-    ['overall', 'Gesamtbewertung'],
-    ['recent', 'Letzte 30 Tage'],
-    ['discount', 'Rabatt'],
-    ['price', 'Preis'],
-    ['popularity', 'Beliebtheit'],
+    ['overall', 'Overall rating'],
+    ['recent', 'Last 30 days'],
+    ['discount', 'Discount'],
+    ['price', 'Price'],
+    ['popularity', 'Popularity'],
   ]);
 
   /**
-   * Erzeugt ein Element mit Attributen und Kindern.
+   * Creates an element with attributes and children.
    * @param {string} tag
-   * @param {!Object<string, string>=} props Attribute; „class“ und „text“
-   *     setzen className bzw. textContent.
+   * @param {!Object<string, string>=} props Attributes; "class" and "text"
+   *     set className and textContent respectively.
    * @param {!Array<!Node|string>=} children
    * @return {!HTMLElement}
    */
@@ -1751,7 +1752,7 @@
    * @param {string} label
    * @param {string} hint
    * @param {!Element} input
-   * @return {!HTMLElement} Zeile mit Eingabefeld.
+   * @return {!HTMLElement} Row with an input field.
    */
   function buildNumberRow(id, label, hint, input) {
     return buildElement('div', {class: `${PREFIX}-row`}, [
@@ -1769,7 +1770,7 @@
    * @param {string} name
    * @param {string} label
    * @param {string} hint
-   * @return {!HTMLElement} Zeile mit Checkbox.
+   * @return {!HTMLElement} Row with a checkbox.
    */
   function buildCheckRow(id, name, label, hint) {
     return buildElement('div', {class: `${PREFIX}-row ${PREFIX}-check`}, [
@@ -1792,7 +1793,7 @@
         buildElement('form', {method: 'dialog'}));
 
     const weights = buildElement('fieldset', {}, [
-      buildElement('legend', {text: 'Gewichte (werden automatisch normiert)'}),
+      buildElement('legend', {text: 'Weights (normalized automatically)'}),
     ]);
     for (const [key, label] of WEIGHT_FIELDS) {
       const id = `${PREFIX}-w-${key}`;
@@ -1812,10 +1813,10 @@
     }
 
     const other = buildElement('fieldset', {}, [
-      buildElement('legend', {text: 'Weitere Einstellungen'}),
+      buildElement('legend', {text: 'Other settings'}),
       buildNumberRow(
-          `${PREFIX}-ref`, 'Referenzpreis (€)',
-          'Bei diesem Endpreis ergibt die Preis-Komponente 50.',
+          `${PREFIX}-ref`, 'Reference price (€)',
+          'At this final price the price component is 50.',
           buildElement('input', {
             id: `${PREFIX}-ref`,
             name: 'referencePrice',
@@ -1825,29 +1826,29 @@
             required: '',
           })),
       buildCheckRow(
-          `${PREFIX}-extra`, 'fetchExtra', 'Zusatzdaten laden',
-          'Quelle aller Rezensionswerte. Aus = keine Netzwerkanfragen, ' +
-              'Score nur aus Rabatt und Preis.'),
+          `${PREFIX}-extra`, 'fetchExtra', 'Load extra data',
+          'Source of all review values. Off = no network requests, ' +
+              'score based on discount and price only.'),
       buildCheckRow(
-          `${PREFIX}-penalty`, 'qualityPenalty', 'Qualitäts-Malus',
-          'Ein hoher Rabatt macht ein schlecht bewertetes Spiel nicht grün.'),
+          `${PREFIX}-penalty`, 'qualityPenalty', 'Quality penalty',
+          'A big discount does not turn a poorly rated game green.'),
     ]);
 
     const saveButton = buildElement(
         'button',
-        {type: 'submit', class: `${PREFIX}-primary`, text: 'Speichern'});
+        {type: 'submit', class: `${PREFIX}-primary`, text: 'Save'});
     const cancelButton =
-        buildElement('button', {type: 'button', text: 'Abbrechen'});
+        buildElement('button', {type: 'button', text: 'Cancel'});
     const defaultsButton = buildElement(
-        'button', {type: 'button', text: 'Standard wiederherstellen'});
+        'button', {type: 'button', text: 'Restore defaults'});
     const cacheButton =
-        buildElement('button', {type: 'button', text: 'Cache leeren'});
+        buildElement('button', {type: 'button', text: 'Clear cache'});
     const status =
         buildElement('div', {class: `${PREFIX}-status`, role: 'status'});
 
     form.append(
         buildElement(
-            'h2', {id: `${PREFIX}-title`, text: 'Deal-Score – Einstellungen'}),
+            'h2', {id: `${PREFIX}-title`, text: 'Deal Score – Settings'}),
         weights,
         other,
         buildElement('div', {class: `${PREFIX}-buttons`}, [
@@ -1864,15 +1865,14 @@
     cancelButton.addEventListener('click', () => dialog.close());
     defaultsButton.addEventListener('click', () => {
       writeForm(form, defaultSettings());
-      status.textContent =
-          'Standardwerte eingetragen – zum Übernehmen „Speichern“ klicken.';
+      status.textContent = 'Defaults filled in – click "Save" to apply.';
     });
     cacheButton.addEventListener('click', () => {
       const removed = cachePrune(true);
       histMem.clear();
       settingsVersion++;
       schedule();
-      status.textContent = `Cache geleert (${removed} Einträge).`;
+      status.textContent = `Cache cleared (${removed} entries).`;
     });
     form.addEventListener('submit', (event) => {
       event.preventDefault();
@@ -1903,7 +1903,7 @@
 
   /**
    * @param {!HTMLFormElement} form
-   * @return {!Object} Rohwerte, noch ungeprüft.
+   * @return {!Object} Raw values, not yet validated.
    */
   function readForm(form) {
     const weights = {};
@@ -1919,7 +1919,7 @@
   }
 
   /**
-   * Zeigt den Anteil jedes Gewichts an der Summe.
+   * Shows each weight's share of the total.
    * @param {!HTMLFormElement} form
    */
   function updateShares(form) {
@@ -1929,11 +1929,11 @@
     WEIGHT_FIELDS.forEach(([key], index) => {
       const share = form.querySelector(`[data-share="${key}"]`);
       share.textContent =
-          total ? `${Math.round((values[index] / total) * 100)} %` : '–';
+          total ? `${Math.round((values[index] / total) * 100)}%` : '–';
     });
   }
 
-  /** Öffnet den Einstellungsdialog. */
+  /** Opens the settings dialog. */
   function openSettings() {
     let dialog = /** @type {?HTMLDialogElement} */ (
         document.getElementById(`${PREFIX}-settings`));
@@ -1948,21 +1948,21 @@
   }
 
   // ===========================================================================
-  // Start
+  // Startup
   // ===========================================================================
 
-  /** Startet das Skript. */
+  /** Starts the script. */
   function init() {
     injectStyles();
     const pruned = cachePrune(false);
-    if (pruned) log(`${pruned} abgelaufene Cache-Einträge entfernt`);
+    if (pruned) log(`Removed ${pruned} expired cache entries`);
     if (GM_API.registerMenuCommand) {
-      GM_API.registerMenuCommand('Deal-Score: Einstellungen …', openSettings);
+      GM_API.registerMenuCommand('Deal Score: Settings …', openSettings);
     }
     observe(document.body);
     schedule();
-    // Wird die Liste komplett ersetzt (z. B. Filterwechsel), sieht der
-    // Listen-Observer das nicht.
+    // If the list is replaced entirely (e.g. when changing filters), the list
+    // observer does not notice.
     setInterval(() => {
       if (listRoot && !listRoot.isConnected) schedule();
     }, 1000);
