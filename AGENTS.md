@@ -22,6 +22,16 @@ A collection of personal userscripts, located in `scripts/` as `*.user.js` files
 - Do **not** create new branches.
 - Always commit directly to `main` and push to `origin main`.
 
+## Language
+
+- All code, comments, commit messages and documentation are written in
+  **English**, even when the conversation with the agent is in German.
+
+## Diagrams
+
+- Create diagrams with [Mermaid.js](https://mermaid.js.org/) (e.g. as
+  ` ```mermaid ` code blocks in Markdown files).
+
 ## Code style
 
 - **JavaScript** follows the
