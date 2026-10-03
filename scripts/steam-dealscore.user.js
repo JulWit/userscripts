@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Wishlist – Deal Score
 // @namespace    https://store.steampowered.com/wishlist/dealscore
-// @version      1.9.0
+// @version      1.10.0
 // @description  Deal score (1–100) for the wishlist, cart and store pages
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -177,6 +177,9 @@
     maxRetries: 4,
     retryBaseDelayMs: 2000,
     histogramQuery: '?l=english&review_score_preference=0',
+    // Hover delay of the score tooltip (the native title tooltip waits
+    // ~500 ms and does not work on touch devices).
+    tooltipDelayMs: 100,
   });
 
   // Locale-dependent patterns and formats – collected in one place. The
@@ -192,7 +195,8 @@
   const PREFIX = 'sws';
   const STORAGE_SETTINGS = 'settings';
   const STORAGE_CACHE_PREFIX = 'hist:';
-  const OWN_SELECTOR = `.${PREFIX}-badge, .${PREFIX}-dialog`;
+  const OWN_SELECTOR =
+      `.${PREFIX}-badge, .${PREFIX}-dialog, .${PREFIX}-tooltip`;
 
   // ===========================================================================
   // Pure functions: parsing, score, color, tooltip (no DOM, no network)
@@ -496,12 +500,20 @@
     return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
   }
 
+  // Number formats are created once: toLocaleString with options builds a new
+  // formatter on every call.
+  const INTEGER_FORMAT = new Intl.NumberFormat(TEXT.locale);
+  const MONEY_FORMAT = new Intl.NumberFormat(
+      TEXT.locale, {style: 'currency', currency: TEXT.currencyCode});
+  /** @type {!Map<number, !Intl.NumberFormat>} Keyed by decimal places. */
+  const decimalFormats = new Map();
+
   /**
    * @param {number} value
    * @return {string} Integer with thousands separators.
    */
   function formatInteger(value) {
-    return Math.round(value).toLocaleString(TEXT.locale);
+    return INTEGER_FORMAT.format(Math.round(value));
   }
 
   /**
@@ -517,8 +529,7 @@
    * @return {string} e.g. "€7.49".
    */
   function formatMoney(value) {
-    return value.toLocaleString(
-        TEXT.locale, {style: 'currency', currency: TEXT.currencyCode});
+    return MONEY_FORMAT.format(value);
   }
 
   /**
@@ -527,10 +538,15 @@
    * @return {string}
    */
   function formatDecimal(value, digits) {
-    return value.toLocaleString(TEXT.locale, {
-      minimumFractionDigits: digits,
-      maximumFractionDigits: digits,
-    });
+    let format = decimalFormats.get(digits);
+    if (!format) {
+      format = new Intl.NumberFormat(TEXT.locale, {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      });
+      decimalFormats.set(digits, format);
+    }
+    return format.format(value);
   }
 
   /**
@@ -1062,6 +1078,15 @@
    * @interface
    */
   class PageAdapter {
+    constructor() {
+      /**
+       * Whether an entry's data comes only from its own subtree. Then a change
+       * inside one entry only requires re-reading that entry.
+       * @const {boolean}
+       */
+      this.independentItems;
+    }
+
     /**
      * @param {!Element|!Document} root
      * @return {!Array<!Element>} All entries below root.
@@ -1086,6 +1111,11 @@
    * @implements {PageAdapter}
    */
   class WishlistPage {
+    constructor() {
+      /** @const {boolean} */
+      this.independentItems = true;
+    }
+
     /**
      * @param {!Element|!Document} root
      * @return {!Array<!Element>}
@@ -1145,6 +1175,11 @@
    * @implements {PageAdapter}
    */
   class CartPage {
+    constructor() {
+      /** @const {boolean} */
+      this.independentItems = true;
+    }
+
     /**
      * @param {!Element|!Document} scope
      * @return {!Array<!Element>} Head links with an image.
@@ -1260,6 +1295,12 @@
    * @implements {PageAdapter}
    */
   class StorePage {
+    constructor() {
+      // The title badge uses the price of the first purchase box.
+      /** @const {boolean} */
+      this.independentItems = false;
+    }
+
     /** @return {?string} App ID from the URL. */
     appid() {
       return location.pathname.match(/^\/app\/(\d+)/)?.[1] || null;
@@ -1436,12 +1477,14 @@
     pill.classList.toggle(`${PREFIX}-neutral`, !color);
     pill.classList.toggle(
         `${PREFIX}-noreviews`, result.status === 'ok' && !result.hasReviews);
-    badge.title = buildTooltip(result, extra.state, {
+    // The breakdown is only built when the tooltip is actually shown.
+    tooltipTexts.set(badge, () => buildTooltip(result, extra.state, {
       bundleSize: data.bundleSize,
       bundleMissing: extra.missing || 0,
       notes: data.notes,
-    });
+    }));
     badge.setAttribute('aria-label', label);
+    if (badge === tooltipBadge && isTooltipVisible()) renderTooltip();
     return result;
   }
 
@@ -1465,8 +1508,17 @@
    * @param {?Array<!Object>} report Collects debug rows, otherwise null.
    */
   function processItem(item, report) {
-    const data = page.readItem(item);
-    if (!data) return;
+    // Reading an entry is the expensive part; reuse the parsed data until a
+    // mutation inside the entry invalidates it.
+    let data = itemCache.get(item);
+    if (!data || !item.contains(data.anchorEl)) {
+      data = page.readItem(item);
+      if (!data) {
+        itemCache.delete(item);
+        return;
+      }
+      itemCache.set(item, data);
+    }
     const anchor = data.anchorEl;
 
     const badges = item.querySelectorAll(`.${PREFIX}-badge`);
@@ -1517,10 +1569,10 @@
     }
   }
 
-  /** @param {!Element} root */
-  function processItems(root) {
+  /** @param {!Iterable<!Element>} items */
+  function processItems(items) {
     const report = DEBUG ? [] : null;
-    for (const item of page.findItems(root)) {
+    for (const item of items) {
       try {
         processItem(item, report);
       } catch (e) {
@@ -1539,6 +1591,28 @@
   /** @type {?Node} */
   let observed = null;
   let frameRequested = false;
+  /** @type {!WeakMap<!Element, !ItemData>} Parsed data per entry. */
+  let itemCache = new WeakMap();
+  /** @type {!Set<!Element>} Entries found by the last full scan. */
+  let knownItems = new Set();
+  /** @type {!Set<!Element>} Entries changed since the last tick. */
+  const dirtyItems = new Set();
+  /** Whether entries may have been added or removed since the last tick. */
+  let fullScanNeeded = true;
+
+  /**
+   * @param {!Node} node
+   * @return {?Element} Known entry that contains the node.
+   */
+  function knownItemOf(node) {
+    let element = node.nodeType === Node.ELEMENT_NODE ?
+        /** @type {!Element} */ (node) :
+        node.parentElement;
+    for (; element && element !== listRoot; element = element.parentElement) {
+      if (knownItems.has(element)) return element;
+    }
+    return null;
+  }
 
   /**
    * @param {!MutationRecord} record
@@ -1557,7 +1631,19 @@
   }
 
   const observer = new MutationObserver((records) => {
-    if (records.some((record) => !isOwnMutation(record))) schedule();
+    let changed = false;
+    for (const record of records) {
+      if (isOwnMutation(record)) continue;
+      changed = true;
+      const item = page.independentItems ? knownItemOf(record.target) : null;
+      if (item) {
+        dirtyItems.add(item);
+      } else {
+        fullScanNeeded = true;
+        if (!page.independentItems) break;
+      }
+    }
+    if (changed) schedule();
   });
 
   /** @param {!Node} target */
@@ -1585,14 +1671,181 @@
     });
   }
 
-  /** Finds the list, observes it and processes all entries. */
+  /**
+   * Finds the list, observes it and updates all entries. Only new or changed
+   * entries are read again; the others just re-check their extra data.
+   */
   function tick() {
     if (!listRoot || !listRoot.isConnected) {
       const items = page.findItems(document);
       listRoot = items.length ? page.listRootOf(items) : null;
+      fullScanNeeded = true;
     }
     observe(listRoot || document.body);
-    if (listRoot) processItems(listRoot);
+    if (listRoot) {
+      if (fullScanNeeded) {
+        if (!page.independentItems) itemCache = new WeakMap();
+        knownItems = new Set(page.findItems(listRoot));
+        fullScanNeeded = false;
+      }
+      for (const item of dirtyItems) itemCache.delete(item);
+      dirtyItems.clear();
+      processItems(knownItems);
+    }
+    if (tooltipBadge && !tooltipBadge.isConnected) hideTooltip();
+  }
+
+  // ===========================================================================
+  // Tooltip (one shared element instead of native title tooltips)
+  // ===========================================================================
+
+  /** @type {!WeakMap<!Element, function(): string>} Text builder per badge. */
+  const tooltipTexts = new WeakMap();
+  /** @type {?HTMLElement} */
+  let tooltipEl = null;
+  /** @type {?Element} Badge the tooltip is shown or about to be shown for. */
+  let tooltipBadge = null;
+  /** @type {?number} */
+  let tooltipTimer = null;
+  let lastPointerType = 'mouse';
+
+  /**
+   * @param {?EventTarget} target
+   * @return {?Element} Badge that contains the event target.
+   */
+  function badgeOf(target) {
+    const node = /** @type {?Node} */ (target);
+    return node && node.nodeType === Node.ELEMENT_NODE ?
+        /** @type {!Element} */ (node).closest(`.${PREFIX}-badge`) :
+        null;
+  }
+
+  /** @return {boolean} */
+  function isTooltipVisible() {
+    return Boolean(tooltipEl && !tooltipEl.hidden);
+  }
+
+  /** @return {!HTMLElement} The tooltip element, created on first use. */
+  function tooltipElement() {
+    if (!tooltipEl || !tooltipEl.isConnected) {
+      tooltipEl = buildElement('div', {
+        class: `${PREFIX}-tooltip`,
+        id: `${PREFIX}-tooltip`,
+        role: 'tooltip',
+      });
+      tooltipEl.hidden = true;
+      document.body.appendChild(tooltipEl);
+    }
+    return tooltipEl;
+  }
+
+  /**
+   * @param {!Element} badge
+   * @param {boolean} immediate Skip the hover delay.
+   */
+  function showTooltip(badge, immediate) {
+    clearTimeout(tooltipTimer);
+    tooltipTimer = null;
+    if (tooltipBadge && tooltipBadge !== badge) {
+      tooltipBadge.removeAttribute('aria-describedby');
+    }
+    tooltipBadge = badge;
+    if (immediate) {
+      renderTooltip();
+    } else {
+      tooltipTimer = setTimeout(renderTooltip, CONFIG.tooltipDelayMs);
+    }
+  }
+
+  /** Fills and positions the tooltip for the current badge. */
+  function renderTooltip() {
+    tooltipTimer = null;
+    const badge = tooltipBadge;
+    const buildText = badge && badge.isConnected && tooltipTexts.get(badge);
+    if (!buildText) {
+      hideTooltip();
+      return;
+    }
+    const tooltip = tooltipElement();
+    tooltip.textContent = buildText();
+    tooltip.hidden = false;
+    badge.setAttribute('aria-describedby', tooltip.id);
+    positionTooltip(tooltip, badge);
+  }
+
+  /**
+   * Places the tooltip below the badge, or above it if there is no room, and
+   * keeps it inside the viewport.
+   * @param {!HTMLElement} tooltip
+   * @param {!Element} badge
+   */
+  function positionTooltip(tooltip, badge) {
+    const margin = 8;
+    const gap = 6;
+    const anchor = (badge.firstElementChild || badge).getBoundingClientRect();
+    const box = tooltip.getBoundingClientRect();
+    const viewport = document.documentElement;
+    const left = Math.max(margin,
+        Math.min(anchor.left, viewport.clientWidth - margin - box.width));
+    let top = anchor.bottom + gap;
+    if (top + box.height > viewport.clientHeight - margin &&
+        anchor.top - gap - box.height >= margin) {
+      top = anchor.top - gap - box.height;
+    }
+    tooltip.style.transform =
+        `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+  }
+
+  /** Hides the tooltip and cancels a pending show. */
+  function hideTooltip() {
+    if (!tooltipBadge && !tooltipTimer) return;
+    clearTimeout(tooltipTimer);
+    tooltipTimer = null;
+    tooltipBadge?.removeAttribute('aria-describedby');
+    tooltipBadge = null;
+    if (tooltipEl) tooltipEl.hidden = true;
+  }
+
+  /** Registers the delegated event listeners (once for the whole page). */
+  function initTooltip() {
+    const passive = {passive: true};
+    document.addEventListener('pointerover', (event) => {
+      // Touch is handled via click: pointerout follows right after the tap.
+      if (event.pointerType === 'touch') return;
+      const badge = badgeOf(event.target);
+      if (badge === tooltipBadge) return;
+      if (badge) {
+        showTooltip(badge, isTooltipVisible());
+      } else {
+        hideTooltip();
+      }
+    }, passive);
+    document.addEventListener('pointerout', (event) => {
+      // Pointer left the window.
+      if (event.pointerType !== 'touch' && !event.relatedTarget) hideTooltip();
+    }, passive);
+    document.addEventListener('pointerdown', (event) => {
+      lastPointerType = event.pointerType;
+      if (!badgeOf(event.target)) hideTooltip();
+    }, {capture: true, passive: true});
+    document.addEventListener('click', (event) => {
+      // Tapping a badge toggles its tooltip instead of activating the row.
+      if (lastPointerType !== 'touch') return;
+      const badge = badgeOf(event.target);
+      if (!badge) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (badge === tooltipBadge) {
+        hideTooltip();
+      } else {
+        showTooltip(badge, true);
+      }
+    }, true);
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') hideTooltip();
+    }, passive);
+    window.addEventListener('scroll', hideTooltip, {capture: true, ...passive});
+    window.addEventListener('resize', hideTooltip, passive);
   }
 
   // ===========================================================================
@@ -1633,6 +1886,27 @@
       }
       .${PREFIX}-pill.${PREFIX}-neutral { color: #c7d5e0; }
       .${PREFIX}-pill.${PREFIX}-noreviews { border: 1px dashed #f2f6f9; }
+
+      .${PREFIX}-tooltip {
+        position: fixed;
+        top: 0;
+        left: 0;
+        z-index: 99999;
+        box-sizing: border-box;
+        max-width: min(440px, calc(100vw - 16px));
+        padding: 7px 10px;
+        border: 1px solid #3d4450;
+        border-radius: 4px;
+        background: #171d25;
+        color: #c7d5e0;
+        font: 12px/1.5 "Motiva Sans", Arial, Helvetica, sans-serif;
+        text-align: left;
+        white-space: pre-line;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+        pointer-events: none;
+      }
+      .${PREFIX}-tooltip::first-line { font-weight: 700; color: #fff; }
+      .${PREFIX}-tooltip[hidden] { display: none; }
 
       .${PREFIX}-dialog {
         box-sizing: border-box;
@@ -1954,6 +2228,7 @@
   /** Starts the script. */
   function init() {
     injectStyles();
+    initTooltip();
     const pruned = cachePrune(false);
     if (pruned) log(`Removed ${pruned} expired cache entries`);
     if (GM_API.registerMenuCommand) {
