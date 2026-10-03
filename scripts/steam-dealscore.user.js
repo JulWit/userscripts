@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Wishlist – Deal Score
 // @namespace    https://store.steampowered.com/wishlist/dealscore
-// @version      1.11.0
+// @version      1.12.0
 // @description  Deal score (1–100) for the wishlist, cart and store pages, with a top-deals panel on the wishlist
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -16,11 +16,10 @@
 // @grant        GM_deleteValue
 // @grant        GM_listValues
 // @grant        GM_registerMenuCommand
-// @grant        GM_xmlhttpRequest
-// @connect      store.steampowered.com
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
+// @ts-check
 
 /**
  * @fileoverview Shows a deal score from 1 to 100 in front of every title on the
@@ -39,106 +38,111 @@
   /**
    * Discount in percent, original and final price.
    * @typedef {{discount: number, original: number, final: number,
-   *     free: boolean}}
+   *     free: boolean}} Price
    */
-  let Price;
 
   /**
    * Totals from /appreviewhistogram: last 30 days and all time.
    * @typedef {{up30: number, down30: number, upTotal: number,
-   *     downTotal: number}}
+   *     downTotal: number}} Histogram
    */
-  let Histogram;
 
   /**
    * @typedef {{overall: number, recent: number, discount: number,
-   *     price: number, popularity: number}}
+   *     price: number, popularity: number}} Weights
    */
-  let Weights;
 
   /**
    * @typedef {{weights: !Weights, referencePrice: number,
-   *     fetchExtra: boolean, qualityPenalty: boolean}}
+   *     fetchExtra: boolean, qualityPenalty: boolean}} Settings
    */
-  let Settings;
 
   /**
    * State of the extra data for one or more games.
-   * state: 'ok' | 'pending' | 'failed' | 'disabled'
-   * @typedef {{state: string, hist: ?Histogram, t: (number|string),
-   *     missing: (number|undefined)}}
+   * @typedef {Object} Extra
+   * @property {string} state 'ok' | 'pending' | 'failed' | 'disabled'
+   * @property {?Histogram} hist
+   * @property {number|string} t Load time(s), part of the badge signature.
+   * @property {number} [missing] Bundles: included games without data.
    */
-  let Extra;
 
   /**
-   * In-memory cache entry. status: 'ok' | 'pending' | 'failed'
-   * @typedef {{status: string, t: (number|undefined),
-   *     hist: (?Histogram|undefined)}}
+   * In-memory cache entry.
+   * @typedef {Object} HistEntry
+   * @property {string} status 'ok' | 'pending' | 'failed'
+   * @property {number} [t]
+   * @property {?Histogram} [hist]
    */
-  let HistEntry;
 
   /**
-   * Entry read by a page adapter. anchorEl is the node the badge is inserted
-   * before (the game title).
-   * @typedef {{
-   *   key: string,
-   *   kind: string,
-   *   id: string,
-   *   appids: !Array<string>,
-   *   title: string,
-   *   anchorEl: !Node,
-   *   price: ?Price,
-   *   bundleSize: (number|undefined),
-   *   notes: (!Array<string>|undefined)
-   * }}
+   * Entry read by a page adapter.
+   * @typedef {Object} ItemData
+   * @property {string} key
+   * @property {string} kind
+   * @property {string} id
+   * @property {!Array<string>} appids
+   * @property {string} title
+   * @property {!Node} anchorEl Node the badge is inserted before (the title).
+   * @property {?Price} price
+   * @property {number} [bundleSize]
+   * @property {!Array<string>} [notes]
    */
-  let ItemData;
 
   /**
-   * Result of the score calculation. status: 'ok' | 'noPrice' | 'noWeights'
-   * @typedef {{
-   *   status: string,
-   *   score: (number|undefined),
-   *   penalty: (number|undefined),
-   *   penaltyPoints: (number|undefined),
-   *   parts: (!Object<string, !Object>|undefined),
-   *   hasReviews: (boolean|undefined)
-   * }}
+   * One component of the score. value (0–1) and points are only set when the
+   * component is available; the remaining fields describe the input.
+   * @typedef {Object} ScorePart
+   * @property {boolean} available
+   * @property {number} weight
+   * @property {number} [value]
+   * @property {number} [points]
+   * @property {?number} [pct]
+   * @property {number} [n]
+   * @property {number} [amount]
+   * @property {boolean} [free]
    */
-  let ScoreResult;
+
+  /**
+   * Result of the score calculation.
+   * @typedef {Object} ScoreResult
+   * @property {string} status 'ok' | 'noPrice' | 'noWeights'
+   * @property {number} [score]
+   * @property {number} [penalty]
+   * @property {number} [penaltyPoints]
+   * @property {!Object<string, !ScorePart>} [parts]
+   * @property {boolean} [hasReviews]
+   */
 
   /**
    * One row of the tooltip breakdown table.
-   * @typedef {{label: string, value: string, points: string, weight: string}}
+   * @typedef {{label: string, value: string, points: string,
+   *     weight: string}} TooltipRow
    */
-  let TooltipRow;
 
   /**
    * Content of the score tooltip. rows is empty when there is no breakdown.
    * @typedef {{title: string, rows: !Array<!TooltipRow>, total: string,
-   *     notes: !Array<string>}}
+   *     notes: !Array<string>}} TooltipContent
    */
-  let TooltipContent;
 
   /**
    * Purchase option on the store page.
-   * @typedef {{block: !Element, heading: !Element, price: !Price}}
+   * @typedef {{block: !Element, heading: !Element, price: !Price}} Offer
    */
-  let Offer;
 
   /**
    * Scored wishlist entry remembered for the top list. version is the
-   * settingsVersion the score was computed with.
+   * settingsVersion the score was computed with, position the row's index in
+   * the list (data-index) when it was last rendered.
    * @typedef {{key: string, appid: string, title: string, price: !Price,
-   *     hist: ?Histogram, score: number, version: number}}
+   *     hist: ?Histogram, score: number, version: number,
+   *     position: ?number}} TopEntry
    */
-  let TopEntry;
 
   /**
    * Preferences of the top list panel.
-   * @typedef {{size: number, collapsed: boolean}}
+   * @typedef {{size: number, collapsed: boolean}} PanelPrefs
    */
-  let PanelPrefs;
 
   // ===========================================================================
   // Configuration – all defaults in one place
@@ -165,7 +169,7 @@
 
     // Default weights (adjustable in the settings dialog).
     weights: {overall: 25, recent: 15, discount: 30, price: 20, popularity: 10},
-    // At this final price (€) the price component is 0.5.
+    // At this final price (in TEXT.currencyCode) the price component is 0.5.
     referencePrice: 20,
     // Load the histogram – the only source for all review values.
     fetchExtra: true,
@@ -212,17 +216,39 @@
     // Top list panel on the wishlist: selectable sizes and the default.
     topListSizes: [10, 15, 20, 25, 50],
     topListDefaultSize: 10,
+    // Without a saved preference the panel starts collapsed on small screens.
+    topListCollapsedQuery: '(max-width: 600px)',
+
+    // Input limits, shared by the settings dialog and the validation.
+    limits: {
+      weight: {min: 0, max: 1000, step: 1},
+      referencePrice: {min: 0.5, max: 1000, step: 0.5},
+    },
   });
 
   // Locale-dependent patterns and formats – collected in one place. The
   // patterns match Steam's page text, which depends on the store language.
+  // Prices are only recognized in currencyCode: the reference price and all
+  // formatting assume that currency. For another store currency, change
+  // currencyCode and the reference price.
   const TEXT = deepFreeze({
     locale: 'en-US',
     currencyCode: 'EUR',
-    currency: /[€$£¥₩₽₹]|\b(?:EUR|USD|GBP|CHF|PLN|zł|kr)\b/,
+    // How Steam prints the currency, by ISO 4217 code. No \b next to symbols:
+    // "ł" is not a word character and Steam writes "12,99zł" without a space.
+    currencyPatterns: {
+      EUR: /€|\bEUR\b/,
+      USD: /\$|\bUSD\b/,
+      GBP: /£|\bGBP\b/,
+      CHF: /\bCHF\b/,
+      PLN: /zł|\bPLN\b/,
+    },
     discountText: /^[-−–]\s*(\d{1,3})\s*%$/,
     free: /^(?:free(?: to play)?|gratis|kostenlos(?: spielbar| spielen)?)$/i,
   });
+
+  /** Matches a price in the store currency. */
+  const CURRENCY_PATTERN = TEXT.currencyPatterns[TEXT.currencyCode];
 
   const PREFIX = 'sws';
   const STORAGE_SETTINGS = 'settings';
@@ -282,7 +308,7 @@
    * @return {?Price}
    */
   function parsePriceLabel(label) {
-    if (!label || !TEXT.currency.test(label)) return null;
+    if (!label || !CURRENCY_PATTERN.test(label)) return null;
     const discountMatch = label.match(/(\d{1,3})\s*%/);
     if (!discountMatch) return null;
     const rest = label.slice(0, discountMatch.index) + ' ' +
@@ -318,7 +344,7 @@
       } else if (TEXT.free.test(text)) {
         free = true;
       } else if (text.length <= 24 && /\d/.test(text) &&
-          TEXT.currency.test(text)) {
+          CURRENCY_PATTERN.test(text)) {
         const value = parseMoney(text);
         if (value != null) amounts.push(value);
       }
@@ -421,6 +447,7 @@
     const histTotal = hist ? hist.upTotal + hist.downTotal : 0;
     const hasReviews = histTotal > 0;
 
+    /** @type {!Object<string, !ScorePart>} */
     const parts = {};
     if (hasReviews) {
       const pAll = hist.upTotal / histTotal;
@@ -549,6 +576,9 @@
       TEXT.locale, {style: 'currency', currency: TEXT.currencyCode});
   /** @type {!Map<number, !Intl.NumberFormat>} Keyed by decimal places. */
   const decimalFormats = new Map();
+  /** Currency symbol for labels, e.g. "€". */
+  const CURRENCY_SYMBOL = MONEY_FORMAT.formatToParts(0)
+      .find((part) => part.type === 'currency')?.value || TEXT.currencyCode;
 
   /**
    * @param {number} value
@@ -596,8 +626,8 @@
    * to the score, followed by notes.
    * @param {!ScoreResult} result
    * @param {string} extraState 'ok' | 'pending' | 'failed' | 'disabled'
-   * @param {{bundleSize: (number|undefined), bundleMissing: (number|undefined),
-   *     notes: (!Array<string>|undefined)}=} meta Bundle details and
+   * @param {{bundleSize?: number, bundleMissing?: number,
+   *     notes?: !Array<string>}=} meta Bundle details and
    *     additional lines.
    * @return {!TooltipContent}
    */
@@ -606,7 +636,8 @@
         ({title, rows: [], total: '', notes: note ? [note] : []});
     if (result.status === 'noPrice') {
       return message('Deal score: –',
-          'No price available (unreleased or not purchasable).');
+          'No price available (unreleased, not purchasable or not in ' +
+              `${TEXT.currencyCode}).`);
     }
     if (extraState === 'pending') {
       return message('Deal score: loading extra data …', '');
@@ -695,61 +726,6 @@
     };
   }
 
-  // ===========================================================================
-  // Script manager, settings & cache (GM storage)
-  // ===========================================================================
-
-  // Script managers provide GM_* as local identifiers, not necessarily as
-  // window properties.
-  /* global GM_getValue, GM_setValue, GM_deleteValue, GM_listValues,
-     GM_registerMenuCommand, GM_xmlhttpRequest */
-  const GM_API = Object.freeze({
-    getValue: typeof GM_getValue === 'function' ? GM_getValue : null,
-    setValue: typeof GM_setValue === 'function' ? GM_setValue : null,
-    deleteValue: typeof GM_deleteValue === 'function' ? GM_deleteValue : null,
-    listValues: typeof GM_listValues === 'function' ? GM_listValues : null,
-    registerMenuCommand: typeof GM_registerMenuCommand === 'function' ?
-        GM_registerMenuCommand :
-        null,
-    xmlhttpRequest:
-        typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : null,
-  });
-
-  /**
-   * @param {string} key
-   * @param {*} fallback
-   * @return {*}
-   */
-  function gmGet(key, fallback) {
-    try {
-      return GM_API.getValue ? GM_API.getValue(key, fallback) : fallback;
-    } catch (e) {
-      return fallback;
-    }
-  }
-
-  /**
-   * @param {string} key
-   * @param {*} value
-   */
-  function gmSet(key, value) {
-    try {
-      if (GM_API.setValue) GM_API.setValue(key, value);
-    } catch (e) {
-      log('GM_setValue failed', e);
-    }
-  }
-
-  const DEBUG = CONFIG.debug || gmGet('debug', false) === true;
-
-  /**
-   * Debug output, only when DEBUG is set.
-   * @param {...*} args
-   */
-  function log(...args) {
-    if (DEBUG) console.log('[Deal Score]', ...args);
-  }
-
   /** @return {!Settings} */
   function defaultSettings() {
     return {
@@ -761,25 +737,33 @@
   }
 
   /**
-   * Validates stored or entered values; invalid ones are replaced.
+   * Validates stored or entered values: invalid ones are replaced by the
+   * defaults, numbers are clamped to CONFIG.limits.
    * @param {?Object} raw
    * @return {!Settings}
    */
   function sanitizeSettings(raw) {
     const input = raw || {};
     const defaults = defaultSettings();
-    const toNumber = (value, fallback, min) =>
+    /**
+     * @param {*} value
+     * @param {number} fallback
+     * @param {{min: number, max: number}} limit
+     * @return {number}
+     */
+    const toNumber = (value, fallback, limit) =>
         value !== '' && value !== null && Number.isFinite(Number(value)) ?
-        Math.max(min, Number(value)) :
+        Math.min(limit.max, Math.max(limit.min, Number(value))) :
         fallback;
-    const weights = {};
-    for (const key of Object.keys(defaults.weights)) {
-      weights[key] = toNumber(input.weights?.[key], defaults.weights[key], 0);
+    const weights = {...defaults.weights};
+    for (const key of Object.keys(weights)) {
+      weights[key] = toNumber(
+          input.weights?.[key], weights[key], CONFIG.limits.weight);
     }
     return {
       weights,
-      referencePrice:
-          toNumber(input.referencePrice, defaults.referencePrice, 0.01),
+      referencePrice: toNumber(input.referencePrice, defaults.referencePrice,
+          CONFIG.limits.referencePrice),
       fetchExtra: typeof input.fetchExtra === 'boolean' ?
           input.fetchExtra :
           defaults.fetchExtra,
@@ -789,16 +773,68 @@
     };
   }
 
+  /** The pure functions, for unit tests and the debug console. */
+  const CORE = Object.freeze({
+    config: CONFIG,
+    text: TEXT,
+    parseMoney,
+    parsePriceLabel,
+    parsePriceTexts,
+    summarizeHistogram,
+    combineHistograms,
+    shrinkRating,
+    easeOut,
+    priceValue,
+    computeScore,
+    scoreColor,
+    buildTooltip,
+    defaultSettings,
+    sanitizeSettings,
+  });
+
+  // Unit tests (tests/*.test.js) load this file with a hook instead of running
+  // it on a page. Everything above is free of DOM, storage and network access,
+  // so the script stops here.
+  if (typeof globalThis.dealScoreTestHook === 'function') {
+    globalThis.dealScoreTestHook(CORE);
+    return;
+  }
+
+  // ===========================================================================
+  // Settings & cache (GM storage)
+  // ===========================================================================
+
+  // Script managers provide GM_* as local identifiers, not necessarily as
+  // window properties.
+  /* global GM_getValue, GM_setValue, GM_deleteValue, GM_listValues,
+     GM_registerMenuCommand */
+
+  const DEBUG = CONFIG.debug || GM_getValue('debug', false) === true;
+
+  /**
+   * Debug output, only when DEBUG is set.
+   * @param {...*} args
+   */
+  function log(...args) {
+    if (DEBUG) console.log('[Deal Score]', ...args);
+  }
+
   /** @type {!Settings} */
-  let settings = sanitizeSettings(gmGet(STORAGE_SETTINGS, null));
+  let settings = sanitizeSettings(GM_getValue(STORAGE_SETTINGS, null));
   let settingsVersion = 0;
+  /**
+   * Incremented when the cache is cleared: requests started before that
+   * discard their result.
+   */
+  let cacheEpoch = 0;
 
   /**
    * @param {string} appid
-   * @return {?Histogram} Cached totals, if still valid.
+   * @return {?(Histogram & {t: number})} Cached totals with their load
+   *     time, if still valid.
    */
   function cacheRead(appid) {
-    const entry = gmGet(STORAGE_CACHE_PREFIX + appid, null);
+    const entry = GM_getValue(STORAGE_CACHE_PREFIX + appid, null);
     const fresh = entry && typeof entry.t === 'number' &&
         Date.now() - entry.t < CONFIG.cacheTtlMs;
     return fresh ? entry : null;
@@ -809,7 +845,7 @@
    * @param {!Histogram} hist
    */
   function cacheWrite(appid, hist) {
-    gmSet(STORAGE_CACHE_PREFIX + appid, {...hist, t: Date.now()});
+    GM_setValue(STORAGE_CACHE_PREFIX + appid, {...hist, t: Date.now()});
   }
 
   /**
@@ -818,21 +854,16 @@
    * @return {number} Number of deleted entries.
    */
   function cachePrune(all) {
-    if (!GM_API.listValues || !GM_API.deleteValue) return 0;
     let removed = 0;
-    try {
-      for (const key of GM_API.listValues()) {
-        if (!key.startsWith(STORAGE_CACHE_PREFIX)) continue;
-        const entry = gmGet(key, null);
-        const expired = !entry || typeof entry.t !== 'number' ||
-            Date.now() - entry.t >= CONFIG.cacheTtlMs;
-        if (all || expired) {
-          GM_API.deleteValue(key);
-          removed++;
-        }
+    for (const key of GM_listValues()) {
+      if (!key.startsWith(STORAGE_CACHE_PREFIX)) continue;
+      const entry = GM_getValue(key, null);
+      const expired = !entry || typeof entry.t !== 'number' ||
+          Date.now() - entry.t >= CONFIG.cacheTtlMs;
+      if (all || expired) {
+        GM_deleteValue(key);
+        removed++;
       }
-    } catch (e) {
-      log('Cache pruning failed', e);
     }
     return removed;
   }
@@ -861,48 +892,8 @@
   }
 
   /**
-   * GET via the script manager (fallback in case fetch fails in the sandbox).
-   * @param {string} url
-   * @return {!Promise<{status: number, text: function(): string}>}
-   */
-  function gmRequest(url) {
-    return new Promise((resolve, reject) => {
-      GM_API.xmlhttpRequest({
-        method: 'GET',
-        url,
-        headers: {Accept: 'application/json'},
-        onload: (response) => resolve({
-          status: response.status,
-          text: () => response.responseText,
-        }),
-        onerror: () => reject(new Error('GM_xmlhttpRequest failed')),
-        ontimeout: () => reject(new Error('GM_xmlhttpRequest timeout')),
-        timeout: 20000,
-      });
-    });
-  }
-
-  /**
-   * @param {string} url
-   * @return {!Promise<{status: number,
-   *     text: function(): (string|!Promise<string>)}>}
-   */
-  async function httpGet(url) {
-    try {
-      const response = await fetch(url, {
-        credentials: 'same-origin',
-        headers: {Accept: 'application/json'},
-      });
-      return {status: response.status, text: () => response.text()};
-    } catch (e) {
-      // Network/sandbox error from fetch → fall back to the script manager.
-      if (GM_API.xmlhttpRequest) return gmRequest(url);
-      throw e;
-    }
-  }
-
-  /**
-   * Loads the review histogram, with backoff on 429 and 5xx.
+   * Loads the review histogram, with backoff on 429 and 5xx. The endpoint is
+   * public and same-origin, so a plain fetch suffices.
    * @param {string} appid
    * @return {!Promise<!Histogram>}
    */
@@ -910,7 +901,10 @@
     const path = `/appreviewhistogram/${appid}${CONFIG.histogramQuery}`;
     const url = new URL(path, location.href).href;
     for (let attempt = 0;; attempt++) {
-      const response = await httpGet(url);
+      const response = await fetch(url, {
+        credentials: 'same-origin',
+        headers: {Accept: 'application/json'},
+      });
       const status = response.status;
       if (status === 429 || status >= 500) {
         if (attempt >= CONFIG.maxRetries) throw new Error(`HTTP ${status}`);
@@ -926,7 +920,7 @@
         continue;
       }
       if (status !== 200) throw new Error(`HTTP ${status}`);
-      return summarizeHistogram(JSON.parse(await response.text()));
+      return summarizeHistogram(await response.json());
     }
   }
 
@@ -977,19 +971,25 @@
         continue;
       }
       activeRequests++;
+      const epoch = cacheEpoch;
       fetchHistogram(appid)
           .then((hist) => {
+            if (epoch !== cacheEpoch) return;
             cacheWrite(appid, hist);
             histMem.set(appid, {status: 'ok', t: Date.now(), hist});
             log('Histogram', appid, hist);
           })
           .catch((e) => {
+            if (epoch !== cacheEpoch) return;
             histMem.set(appid, {status: 'failed', t: Date.now()});
             log('Histogram failed', appid, e);
           })
           .finally(() => {
             activeRequests--;
             queued.delete(appid);
+            // The result was discarded because the cache was cleared in the
+            // meantime: request again if the game is still waiting for it.
+            if (histMem.get(appid)?.status === 'pending') enqueue(appid);
             schedule();
             pump();
           });
@@ -1136,46 +1136,71 @@
   // ===========================================================================
 
   /**
-   * Common interface of the page adapters.
-   * @interface
+   * Base class of the page adapters. Subclasses implement findItems,
+   * listRootOf and readItem and may override the other methods.
+   * @abstract
    */
   class PageAdapter {
-    constructor() {
-      /**
-       * Whether an entry's data comes only from its own subtree. Then a change
-       * inside one entry only requires re-reading that entry.
-       * @const {boolean}
-       */
-      this.independentItems;
+    /**
+     * @param {boolean} independentItems Whether an entry's data comes only
+     *     from its own subtree. Then a change inside one entry only requires
+     *     re-reading that entry.
+     */
+    constructor(independentItems) {
+      /** @const {boolean} */
+      this.independentItems = independentItems;
     }
 
     /**
+     * @abstract
      * @param {!Element|!Document} root
      * @return {!Array<!Element>} All entries below root.
      */
-    findItems(root) {}
+    findItems(root) {
+      throw new Error('Not implemented');
+    }
 
     /**
+     * @abstract
      * @param {!Array<!Element>} items
      * @return {!Element} Element that contains all entries.
      */
-    listRootOf(items) {}
+    listRootOf(items) {
+      throw new Error('Not implemented');
+    }
 
     /**
+     * @abstract
      * @param {!Element} item
      * @return {?ItemData}
      */
-    readItem(item) {}
+    readItem(item) {
+      throw new Error('Not implemented');
+    }
+
+    /**
+     * @param {!Element} listRoot
+     * @return {!Array<!Element>} Elements to observe for changes; together
+     *     they contain everything readItem depends on.
+     */
+    watchTargets(listRoot) {
+      return [listRoot];
+    }
+
+    /**
+     * @param {!Element} item
+     * @return {?number} Position of the entry in the whole list, if the page
+     *     exposes one.
+     */
+    positionOf(item) {
+      return null;
+    }
   }
 
-  /**
-   * Wishlist: virtualized React list, one div[data-index] per row.
-   * @implements {PageAdapter}
-   */
-  class WishlistPage {
+  /** Wishlist: virtualized React list, one div[data-index] per row. */
+  class WishlistPage extends PageAdapter {
     constructor() {
-      /** @const {boolean} */
-      this.independentItems = true;
+      super(true);
     }
 
     /**
@@ -1186,6 +1211,18 @@
       return [...root.querySelectorAll('div[data-index]')].filter(
           (row) => row.querySelector('a[href*="/app/"]') &&
               !row.parentElement?.closest('div[data-index]'));
+    }
+
+    /**
+     * Read on every pass, not cached: the virtualized list may move a row
+     * element to another index.
+     * @param {!Element} row
+     * @return {?number}
+     */
+    positionOf(row) {
+      const value = row.getAttribute('data-index');
+      const index = value ? Number(value) : NaN;
+      return Number.isInteger(index) && index >= 0 ? index : null;
     }
 
     /**
@@ -1205,7 +1242,8 @@
           (link) => !isOwn(link));
       const titleAnchor = links.find(
           (link) => !link.querySelector('img, [aria-label]') &&
-              link.textContent.trim() && !TEXT.currency.test(link.textContent));
+              link.textContent.trim() &&
+              !CURRENCY_PATTERN.test(link.textContent));
       if (!titleAnchor) return null;
       let appid = appIdOf(titleAnchor);
       if (!appid) {
@@ -1232,14 +1270,10 @@
   const CART_HEAD_SELECTOR =
       'a[href*="/app/"], a[href*="/bundle/"], a[href*="/sub/"]';
 
-  /**
-   * Cart: head link with an image, title as a separate element.
-   * @implements {PageAdapter}
-   */
-  class CartPage {
+  /** Cart: head link with an image, title as a separate element. */
+  class CartPage extends PageAdapter {
     constructor() {
-      /** @const {boolean} */
-      this.independentItems = true;
+      super(true);
     }
 
     /**
@@ -1350,17 +1384,23 @@
 
   /** Desktop title and responsive title (#appHubAppName_responsive). */
   const STORE_TITLE_SELECTOR = '.apphub_AppName';
+  /** Purchase box of an edition, package or bundle. */
+  const STORE_OFFER_SELECTOR = '.game_area_purchase_game';
 
   /**
    * Store page of a game: classic server-rendered HTML with stable classes and
    * data attributes.
-   * @implements {PageAdapter}
    */
-  class StorePage {
+  class StorePage extends PageAdapter {
     constructor() {
       // The title badge uses the price of the first purchase box.
-      /** @const {boolean} */
-      this.independentItems = false;
+      super(false);
+      /**
+       * Offers found by the last findItems call. Entries are not independent,
+       * so every change triggers findItems before readItem runs again.
+       * @type {?Array<!Offer>}
+       */
+      this.offerCache = null;
     }
 
     /** @return {?string} App ID from the URL. */
@@ -1376,7 +1416,7 @@
      */
     offers(scope) {
       const offers = [];
-      for (const block of scope.querySelectorAll('.game_area_purchase_game')) {
+      for (const block of scope.querySelectorAll(STORE_OFFER_SELECTOR)) {
         if (block.querySelector('input[name="bundleid"]')) continue;
         const heading = this.heading(block);
         const price = readPrice(block, [], heading);
@@ -1423,9 +1463,11 @@
      */
     findItems(root) {
       const items = [...root.querySelectorAll(STORE_TITLE_SELECTOR)];
-      const offers = this.offers(root);
+      this.offerCache = this.offers(root);
       // Separate badges in the purchase boxes only with multiple editions.
-      if (offers.length > 1) items.push(...offers.map((offer) => offer.block));
+      if (this.offerCache.length > 1) {
+        items.push(...this.offerCache.map((offer) => offer.block));
+      }
       return items;
     }
 
@@ -1434,8 +1476,22 @@
      * @return {!Element}
      */
     listRootOf(items) {
-      const blocks = document.querySelectorAll('.game_area_purchase_game');
+      const blocks = document.querySelectorAll(STORE_OFFER_SELECTOR);
       return commonAncestor([...items, ...blocks]);
+    }
+
+    /**
+     * The list root spans most of the page (including the media carousel);
+     * only the titles and the purchase area matter.
+     * @param {!Element} listRoot
+     * @return {!Array<!Element>}
+     */
+    watchTargets(listRoot) {
+      const targets = new Set(listRoot.querySelectorAll(STORE_TITLE_SELECTOR));
+      for (const block of listRoot.querySelectorAll(STORE_OFFER_SELECTOR)) {
+        targets.add(block.closest('#game_area_purchase') || block);
+      }
+      return [...targets];
     }
 
     /**
@@ -1445,7 +1501,7 @@
     readItem(item) {
       const appid = this.appid();
       if (!appid) return null;
-      const offers = this.offers(document);
+      const offers = this.offerCache || this.offers(document);
 
       if (item.matches(STORE_TITLE_SELECTOR)) {
         const anchorEl = this.firstChild(item);
@@ -1469,7 +1525,9 @@
       const offer = offers.find((candidate) => candidate.block === item);
       const anchorEl = offer && this.firstChild(offer.heading);
       if (!anchorEl) return null;
-      const subid = item.querySelector('input[name="subid"]')?.value ||
+      const subidInput = /** @type {?HTMLInputElement} */ (
+          item.querySelector('input[name="subid"]'));
+      const subid = subidInput?.value ||
           String(offers.indexOf(offer));
       return {
         key: `sub/${subid}`,
@@ -1494,277 +1552,14 @@
   const page = createPageAdapter();
 
   // ===========================================================================
-  // Badges (React nodes are never modified, only our own elements inserted)
-  // ===========================================================================
-
-  /** @return {!Element} */
-  function createBadge() {
-    const badge = document.createElement('span');
-    badge.className = `${PREFIX}-badge`;
-    badge.setAttribute('role', 'img');
-    const pill = document.createElement('span');
-    pill.className = `${PREFIX}-pill`;
-    badge.appendChild(pill);
-    return badge;
-  }
-
-  /**
-   * @param {!Element} badge
-   * @param {!ItemData} data
-   * @param {!Extra} extra
-   * @return {!ScoreResult}
-   */
-  function renderBadge(badge, data, extra) {
-    const result = computeScore(data, extra.hist, settings);
-    const pill = /** @type {!HTMLElement} */ (badge.firstElementChild);
-    let text;
-    let label;
-    let color = null;
-    if (result.status === 'noPrice') {
-      text = '–';
-      label = 'Deal score unavailable';
-    } else if (extra.state === 'pending') {
-      text = '…';
-      label = 'Calculating deal score';
-    } else if (result.status !== 'ok') {
-      text = '–';
-      label = 'Deal score unavailable';
-    } else {
-      text = String(result.score);
-      label = `Deal score ${result.score} out of 100`;
-      color = scoreColor(result.score);
-    }
-    pill.textContent = text;
-    pill.style.background = color || CONFIG.neutralColor;
-    pill.classList.toggle(`${PREFIX}-neutral`, !color);
-    pill.classList.toggle(
-        `${PREFIX}-noreviews`, result.status === 'ok' && !result.hasReviews);
-    // The breakdown is only built when the tooltip is actually shown.
-    tooltipTexts.set(badge, () => buildTooltip(result, extra.state, {
-      bundleSize: data.bundleSize,
-      bundleMissing: extra.missing || 0,
-      notes: data.notes,
-    }));
-    badge.setAttribute('aria-label', label);
-    if (badge === tooltipBadge && isTooltipVisible()) renderTooltip();
-    return result;
-  }
-
-  /**
-   * Sets or removes a data attribute, only if it changes.
-   * @param {!HTMLElement} element
-   * @param {string} name
-   * @param {?string} value null removes the attribute.
-   */
-  function setData(element, name, value) {
-    if (value == null) {
-      if (name in element.dataset) delete element.dataset[name];
-    } else if (element.dataset[name] !== value) {
-      element.dataset[name] = value;
-    }
-  }
-
-  /**
-   * Inserts or updates the badge of an entry (idempotent).
-   * @param {!Element} item
-   * @param {?Array<!Object>} report Collects debug rows, otherwise null.
-   */
-  function processItem(item, report) {
-    // Reading an entry is the expensive part; reuse the parsed data until a
-    // mutation inside the entry invalidates it.
-    let data = itemCache.get(item);
-    if (!data || !item.contains(data.anchorEl)) {
-      data = page.readItem(item);
-      if (!data) {
-        itemCache.delete(item);
-        return;
-      }
-      itemCache.set(item, data);
-    }
-    const anchor = data.anchorEl;
-
-    const badges = item.querySelectorAll(`.${PREFIX}-badge`);
-    // Remove duplicate badges (our own elements only).
-    for (let i = 1; i < badges.length; i++) {
-      badges[i].remove();
-    }
-    const badge = /** @type {!HTMLElement} */ (badges[0] || createBadge());
-    if (badge.nextSibling !== anchor) {
-      anchor.parentNode.insertBefore(badge, anchor);
-    }
-    if (badge.dataset.key !== data.key) {
-      badge.dataset.key = data.key;
-      delete badge.dataset.sig;
-    }
-    setData(badge, 'appid', data.kind === 'app' ? data.id : null);
-    // Set before getExtraFor: the queue checks for it.
-    setData(badge, 'appids', data.appids.join(' '));
-
-    const extra = getExtraFor(data.appids);
-    const sig = [
-      data.key,
-      data.appids.join(','),
-      JSON.stringify(data.price),
-      extra.state,
-      extra.t,
-      settingsVersion,
-    ].join('|');
-    if (badge.dataset.sig === sig) return;
-
-    const result = renderBadge(badge, data, extra);
-    badge.dataset.sig = sig;
-    rememberTopEntry(data, extra, result);
-    if (report) {
-      const hist = extra.hist;
-      const reviews = hist ? hist.upTotal + hist.downTotal : null;
-      report.push({
-        item: data.key,
-        title: data.title,
-        reviews,
-        positive: reviews ? hist.upTotal / reviews : null,
-        recent30: hist ? hist.up30 + hist.down30 : null,
-        discount: data.price?.discount ?? null,
-        original: data.price?.original ?? null,
-        final: data.price?.final ?? null,
-        extra: extra.state,
-        score: result.score ?? null,
-      });
-    }
-  }
-
-  /** @param {!Iterable<!Element>} items */
-  function processItems(items) {
-    const report = DEBUG ? [] : null;
-    for (const item of items) {
-      try {
-        processItem(item, report);
-      } catch (e) {
-        console.error('[Deal Score] Error in row', item, e);
-      }
-    }
-    if (report && report.length) console.table(report);
-  }
-
-  // ===========================================================================
-  // Observing the list
-  // ===========================================================================
-
-  /** @type {?Element} */
-  let listRoot = null;
-  /** @type {?Node} */
-  let observed = null;
-  let frameRequested = false;
-  /** @type {!WeakMap<!Element, !ItemData>} Parsed data per entry. */
-  let itemCache = new WeakMap();
-  /** @type {!Set<!Element>} Entries found by the last full scan. */
-  let knownItems = new Set();
-  /** @type {!Set<!Element>} Entries changed since the last tick. */
-  const dirtyItems = new Set();
-  /** Whether entries may have been added or removed since the last tick. */
-  let fullScanNeeded = true;
-
-  /**
-   * @param {!Node} node
-   * @return {?Element} Known entry that contains the node.
-   */
-  function knownItemOf(node) {
-    let element = node.nodeType === Node.ELEMENT_NODE ?
-        /** @type {!Element} */ (node) :
-        node.parentElement;
-    for (; element && element !== listRoot; element = element.parentElement) {
-      if (knownItems.has(element)) return element;
-    }
-    return null;
-  }
-
-  /**
-   * @param {!MutationRecord} record
-   * @return {boolean} Whether the change only affects our own elements.
-   */
-  function isOwnMutation(record) {
-    const target = record.target.nodeType === Node.ELEMENT_NODE ?
-        /** @type {!Element} */ (record.target) :
-        record.target.parentElement;
-    if (target && isOwn(target)) return true;
-    if (record.type !== 'childList') return false;
-    const nodes = [...record.addedNodes, ...record.removedNodes];
-    return nodes.length > 0 &&
-        nodes.every((node) => node.nodeType === Node.ELEMENT_NODE &&
-            /** @type {!Element} */ (node).matches(OWN_SELECTOR));
-  }
-
-  const observer = new MutationObserver((records) => {
-    let changed = false;
-    for (const record of records) {
-      if (isOwnMutation(record)) continue;
-      changed = true;
-      const item = page.independentItems ? knownItemOf(record.target) : null;
-      if (item) {
-        dirtyItems.add(item);
-      } else {
-        fullScanNeeded = true;
-        if (!page.independentItems) break;
-      }
-    }
-    if (changed) schedule();
-  });
-
-  /** @param {!Node} target */
-  function observe(target) {
-    if (observed === target) return;
-    observer.disconnect();
-    observer.observe(target, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: ['href', 'title', 'aria-label'],
-    });
-    observed = target;
-    log('Observing', target === document.body ? 'body' : 'list');
-  }
-
-  /** Batches processing via requestAnimationFrame. */
-  function schedule() {
-    if (frameRequested) return;
-    frameRequested = true;
-    requestAnimationFrame(() => {
-      frameRequested = false;
-      tick();
-    });
-  }
-
-  /**
-   * Finds the list, observes it and updates all entries. Only new or changed
-   * entries are read again; the others just re-check their extra data.
-   */
-  function tick() {
-    if (!listRoot || !listRoot.isConnected) {
-      const items = page.findItems(document);
-      listRoot = items.length ? page.listRootOf(items) : null;
-      fullScanNeeded = true;
-    }
-    observe(listRoot || document.body);
-    if (listRoot) {
-      if (fullScanNeeded) {
-        if (!page.independentItems) itemCache = new WeakMap();
-        knownItems = new Set(page.findItems(listRoot));
-        fullScanNeeded = false;
-      }
-      for (const item of dirtyItems) itemCache.delete(item);
-      dirtyItems.clear();
-      processItems(knownItems);
-    }
-    updateTopList();
-    if (tooltipBadge && !tooltipBadge.isConnected) hideTooltip();
-  }
-
-  // ===========================================================================
   // Tooltip (one shared element instead of native title tooltips)
   // ===========================================================================
 
-  /** @type {!WeakMap<!Element, function(): string>} Text builder per badge. */
-  const tooltipTexts = new WeakMap();
+  /**
+   * @type {!WeakMap<!Element, function(): !TooltipContent>} Builds the
+   *     tooltip content of each badge on demand.
+   */
+  const tooltipBuilders = new WeakMap();
   /** @type {?HTMLElement} */
   let tooltipEl = null;
   /** @type {?Element} Badge the tooltip is shown or about to be shown for. */
@@ -1866,7 +1661,7 @@
     tooltipTimer = null;
     const badge = tooltipBadge;
     const buildContent =
-        badge && badge.isConnected && tooltipTexts.get(badge);
+        badge && badge.isConnected && tooltipBuilders.get(badge);
     if (!buildContent) {
       hideTooltip();
       return;
@@ -1946,10 +1741,27 @@
         showTooltip(badge, true);
       }
     }, true);
+    document.addEventListener('focusin', (event) => {
+      // Only keyboard focus: clicks and taps focus the badge as well, but are
+      // handled by the pointer listeners.
+      const badge = badgeOf(event.target);
+      if (badge && badge.matches(':focus-visible')) showTooltip(badge, true);
+    });
+    document.addEventListener('focusout', (event) => {
+      if (badgeOf(event.target) === tooltipBadge) hideTooltip();
+    });
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') hideTooltip();
     }, passive);
-    window.addEventListener('scroll', hideTooltip, {capture: true, ...passive});
+    window.addEventListener('scroll', () => {
+      // Focusing a badge scrolls it into view: keep its tooltip in place.
+      if (tooltipBadge && tooltipBadge === document.activeElement &&
+          isTooltipVisible()) {
+        positionTooltip(tooltipElement(), tooltipBadge);
+      } else {
+        hideTooltip();
+      }
+    }, {capture: true, ...passive});
     window.addEventListener('resize', hideTooltip, passive);
   }
 
@@ -1958,13 +1770,23 @@
   // ===========================================================================
 
   // The wishlist is virtualized: only the rows near the viewport exist. The
-  // panel therefore collects every scored row seen while scrolling.
+  // panel therefore collects every scored row seen while scrolling. Entries
+  // are dropped again when another game takes over their list position
+  // (removed from the wishlist, list re-sorted) and all at once when the list
+  // is replaced or the URL changes (filters, another wishlist).
 
   /** @type {!Map<string, !TopEntry>} Scored entries seen so far, by key. */
   const topEntries = new Map();
+  /** @type {!Map<number, string>} Key last seen at each list position. */
+  const keyAtPosition = new Map();
   const topListEnabled = page instanceof WishlistPage;
   let topListDirty = false;
   let topListVersion = 0;
+  /**
+   * Incremented when the top list is reset, so that rendered badges report
+   * their entries again.
+   */
+  let topListEpoch = 0;
   /** @type {?HTMLElement} */
   let panelEl = null;
   let panelSig = '';
@@ -1979,20 +1801,51 @@
       size: CONFIG.topListSizes.includes(input.size) ?
           input.size :
           CONFIG.topListDefaultSize,
-      collapsed: input.collapsed === true,
+      collapsed: typeof input.collapsed === 'boolean' ?
+          input.collapsed :
+          window.matchMedia(CONFIG.topListCollapsedQuery).matches,
     };
   }
 
   /** @type {!PanelPrefs} */
-  const panelPrefs = sanitizePanelPrefs(gmGet(STORAGE_PANEL, null));
+  const panelPrefs = sanitizePanelPrefs(GM_getValue(STORAGE_PANEL, null));
+
+  /** Forgets all entries, e.g. when the list was replaced. */
+  function resetTopList() {
+    if (!topListEnabled) return;
+    topEntries.clear();
+    keyAtPosition.clear();
+    topListEpoch++;
+    topListDirty = true;
+  }
+
+  /**
+   * Records which entry is shown at a list position. An entry whose position
+   * is taken over by another one was removed or has moved; it is dropped
+   * until its row is rendered again.
+   * @param {string} key
+   * @param {?number} position
+   */
+  function notePosition(key, position) {
+    if (!topListEnabled || position == null) return;
+    const previous = keyAtPosition.get(position);
+    if (previous === key) return;
+    keyAtPosition.set(position, key);
+    const displaced = previous && topEntries.get(previous);
+    if (displaced && displaced.position === position) {
+      topEntries.delete(previous);
+      topListDirty = true;
+    }
+  }
 
   /**
    * Remembers or forgets an entry after its badge was rendered.
    * @param {!ItemData} data
+   * @param {?number} position
    * @param {!Extra} extra
    * @param {!ScoreResult} result
    */
-  function rememberTopEntry(data, extra, result) {
+  function rememberTopEntry(data, position, extra, result) {
     if (!topListEnabled) return;
     if (result.status === 'ok' && extra.state !== 'pending') {
       topEntries.set(data.key, {
@@ -2003,6 +1856,7 @@
         hist: extra.hist,
         score: /** @type {number} */ (result.score),
         version: settingsVersion,
+        position,
       });
     } else {
       topEntries.delete(data.key);
@@ -2050,7 +1904,7 @@
 
   /** Saves the preferences and redraws the panel. */
   function applyPanelPrefs() {
-    gmSet(STORAGE_PANEL, panelPrefs);
+    GM_setValue(STORAGE_PANEL, panelPrefs);
     topListDirty = true;
     updateTopList();
   }
@@ -2064,10 +1918,10 @@
       'class': `${PREFIX}-panel-toggle`,
       'aria-controls': bodyId,
     });
-    const select = buildElement('select', {
+    const select = /** @type {!HTMLSelectElement} */ (buildElement('select', {
       'class': `${PREFIX}-panel-size`,
       'aria-label': 'Number of titles',
-    });
+    }));
     for (const size of CONFIG.topListSizes) {
       select.append(
           buildElement('option', {value: String(size), text: `Top ${size}`}));
@@ -2114,10 +1968,12 @@
     const toggle = panel.querySelector(`.${PREFIX}-panel-toggle`);
     toggle.textContent = `${panelPrefs.collapsed ? '▸' : '▾'} Top deals`;
     toggle.setAttribute('aria-expanded', String(!panelPrefs.collapsed));
-    panel.querySelector(`.${PREFIX}-panel-size`).value =
-        String(panelPrefs.size);
-    panel.querySelector(`.${PREFIX}-panel-body`).hidden =
-        panelPrefs.collapsed;
+    const sizeSelect = /** @type {!HTMLSelectElement} */ (
+        panel.querySelector(`.${PREFIX}-panel-size`));
+    sizeSelect.value = String(panelPrefs.size);
+    const body = /** @type {!HTMLElement} */ (
+        panel.querySelector(`.${PREFIX}-panel-body`));
+    body.hidden = panelPrefs.collapsed;
     if (panelPrefs.collapsed) return;
 
     panel.querySelector(`.${PREFIX}-panel-list`).replaceChildren(
@@ -2146,6 +2002,305 @@
     panel.querySelector(`.${PREFIX}-panel-foot`).textContent =
         `${formatInteger(topEntries.size)} ${noun} scored so far – ` +
         'scroll through the wishlist to include more.';
+  }
+
+  // ===========================================================================
+  // Badges (React nodes are never modified, only our own elements inserted)
+  // ===========================================================================
+
+  /** @type {!WeakMap<!Element, !ItemData>} Parsed data per entry. */
+  let itemCache = new WeakMap();
+
+  /** @return {!HTMLElement} */
+  function createBadge() {
+    const badge = document.createElement('span');
+    badge.className = `${PREFIX}-badge`;
+    badge.setAttribute('role', 'img');
+    // Focusable, so that keyboard users can open the tooltip.
+    badge.tabIndex = 0;
+    const pill = document.createElement('span');
+    pill.className = `${PREFIX}-pill`;
+    badge.appendChild(pill);
+    return badge;
+  }
+
+  /**
+   * @param {!Element} badge
+   * @param {!ItemData} data
+   * @param {!Extra} extra
+   * @return {!ScoreResult}
+   */
+  function renderBadge(badge, data, extra) {
+    const result = computeScore(data, extra.hist, settings);
+    const pill = /** @type {!HTMLElement} */ (badge.firstElementChild);
+    let text;
+    let label;
+    let color = null;
+    if (result.status === 'noPrice') {
+      text = '–';
+      label = 'Deal score unavailable';
+    } else if (extra.state === 'pending') {
+      text = '…';
+      label = 'Calculating deal score';
+    } else if (result.status !== 'ok') {
+      text = '–';
+      label = 'Deal score unavailable';
+    } else {
+      text = String(result.score);
+      label = `Deal score ${result.score} out of 100`;
+      color = scoreColor(result.score);
+    }
+    pill.textContent = text;
+    pill.style.background = color || CONFIG.neutralColor;
+    pill.classList.toggle(`${PREFIX}-neutral`, !color);
+    pill.classList.toggle(
+        `${PREFIX}-noreviews`, result.status === 'ok' && !result.hasReviews);
+    // The breakdown is only built when the tooltip is actually shown.
+    tooltipBuilders.set(badge, () => buildTooltip(result, extra.state, {
+      bundleSize: data.bundleSize,
+      bundleMissing: extra.missing || 0,
+      notes: data.notes,
+    }));
+    badge.setAttribute('aria-label', label);
+    if (badge === tooltipBadge && isTooltipVisible()) renderTooltip();
+    return result;
+  }
+
+  /**
+   * Sets or removes a data attribute, only if it changes.
+   * @param {!HTMLElement} element
+   * @param {string} name
+   * @param {?string} value null removes the attribute.
+   */
+  function setData(element, name, value) {
+    if (value == null) {
+      if (name in element.dataset) delete element.dataset[name];
+    } else if (element.dataset[name] !== value) {
+      element.dataset[name] = value;
+    }
+  }
+
+  /**
+   * Inserts or updates the badge of an entry (idempotent).
+   * @param {!Element} item
+   * @param {?Array<!Object>} report Collects debug rows, otherwise null.
+   */
+  function processItem(item, report) {
+    // Reading an entry is the expensive part; reuse the parsed data until a
+    // mutation inside the entry invalidates it.
+    let data = itemCache.get(item);
+    if (!data || !item.contains(data.anchorEl)) {
+      data = page.readItem(item);
+      if (!data) {
+        itemCache.delete(item);
+        return;
+      }
+      itemCache.set(item, data);
+    }
+    const anchor = data.anchorEl;
+    const position = page.positionOf(item);
+    notePosition(data.key, position);
+
+    const badges = item.querySelectorAll(`.${PREFIX}-badge`);
+    // Remove duplicate badges (our own elements only).
+    for (let i = 1; i < badges.length; i++) {
+      badges[i].remove();
+    }
+    const badge = /** @type {!HTMLElement} */ (badges[0] || createBadge());
+    if (badge.nextSibling !== anchor) {
+      anchor.parentNode.insertBefore(badge, anchor);
+    }
+    if (badge.dataset.key !== data.key) {
+      badge.dataset.key = data.key;
+      delete badge.dataset.sig;
+    }
+    setData(badge, 'appid', data.kind === 'app' ? data.id : null);
+    // Set before getExtraFor: the queue checks for it.
+    setData(badge, 'appids', data.appids.join(' '));
+
+    const extra = getExtraFor(data.appids);
+    const sig = [
+      data.key,
+      data.appids.join(','),
+      JSON.stringify(data.price),
+      extra.state,
+      extra.t,
+      settingsVersion,
+      position,
+      topListEpoch,
+    ].join('|');
+    if (badge.dataset.sig === sig) return;
+
+    const result = renderBadge(badge, data, extra);
+    badge.dataset.sig = sig;
+    rememberTopEntry(data, position, extra, result);
+    if (report) {
+      const hist = extra.hist;
+      const reviews = hist ? hist.upTotal + hist.downTotal : null;
+      report.push({
+        item: data.key,
+        title: data.title,
+        reviews,
+        positive: reviews ? hist.upTotal / reviews : null,
+        recent30: hist ? hist.up30 + hist.down30 : null,
+        discount: data.price?.discount ?? null,
+        original: data.price?.original ?? null,
+        final: data.price?.final ?? null,
+        extra: extra.state,
+        score: result.score ?? null,
+      });
+    }
+  }
+
+  /** @param {!Iterable<!Element>} items */
+  function processItems(items) {
+    const report = DEBUG ? [] : null;
+    for (const item of items) {
+      try {
+        processItem(item, report);
+      } catch (e) {
+        console.error('[Deal Score] Error in row', item, e);
+      }
+    }
+    if (report && report.length) console.table(report);
+  }
+
+  // ===========================================================================
+  // Observing the list
+  // ===========================================================================
+
+  /** @type {?Element} */
+  let listRoot = null;
+  /** @type {?Node} List root (or body) whose targets are observed. */
+  let observedRoot = null;
+  let frameRequested = false;
+  /** @type {!Set<!Element>} Entries found by the last full scan. */
+  let knownItems = new Set();
+  /** @type {!Set<!Element>} Entries changed since the last tick. */
+  const dirtyItems = new Set();
+  /** Whether entries may have been added or removed since the last tick. */
+  let fullScanNeeded = true;
+  /** Page URL without hash, to notice navigation within the app. */
+  let lastUrl = location.pathname + location.search;
+
+  /**
+   * @param {!Node} node
+   * @return {?Element} Known entry that contains the node.
+   */
+  function knownItemOf(node) {
+    let element = node.nodeType === Node.ELEMENT_NODE ?
+        /** @type {!Element} */ (node) :
+        node.parentElement;
+    for (; element && element !== listRoot; element = element.parentElement) {
+      if (knownItems.has(element)) return element;
+    }
+    return null;
+  }
+
+  /**
+   * @param {!MutationRecord} record
+   * @return {boolean} Whether the change only affects our own elements.
+   */
+  function isOwnMutation(record) {
+    const target = record.target.nodeType === Node.ELEMENT_NODE ?
+        /** @type {!Element} */ (record.target) :
+        record.target.parentElement;
+    if (target && isOwn(target)) return true;
+    if (record.type !== 'childList') return false;
+    const nodes = [...record.addedNodes, ...record.removedNodes];
+    return nodes.length > 0 &&
+        nodes.every((node) => node.nodeType === Node.ELEMENT_NODE &&
+            /** @type {!Element} */ (node).matches(OWN_SELECTOR));
+  }
+
+  const OBSERVER_OPTIONS = Object.freeze({
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ['href', 'title', 'aria-label'],
+  });
+
+  const observer = new MutationObserver((records) => {
+    let changed = false;
+    for (const record of records) {
+      if (isOwnMutation(record)) continue;
+      changed = true;
+      const item = page.independentItems ? knownItemOf(record.target) : null;
+      if (item) {
+        dirtyItems.add(item);
+      } else {
+        fullScanNeeded = true;
+        if (!page.independentItems) break;
+      }
+    }
+    if (changed) schedule();
+  });
+
+  // Watches the ancestors of the list root (children only, no subtree): if
+  // the list is replaced entirely (e.g. when changing filters), the list
+  // observer does not notice.
+  const detachObserver = new MutationObserver(() => {
+    if (listRoot && !listRoot.isConnected) schedule();
+  });
+
+  /** @param {!Element} root List root, or document.body while searching. */
+  function observe(root) {
+    if (observedRoot === root) return;
+    observer.disconnect();
+    detachObserver.disconnect();
+    const searching = root === document.body;
+    for (const target of searching ? [root] : page.watchTargets(root)) {
+      observer.observe(target, OBSERVER_OPTIONS);
+    }
+    if (!searching) {
+      for (let node = root.parentNode; node; node = node.parentNode) {
+        detachObserver.observe(node, {childList: true});
+      }
+    }
+    observedRoot = root;
+    log('Observing', searching ? 'body' : 'list');
+  }
+
+  /** Batches processing via requestAnimationFrame. */
+  function schedule() {
+    if (frameRequested) return;
+    frameRequested = true;
+    requestAnimationFrame(() => {
+      frameRequested = false;
+      tick();
+    });
+  }
+
+  /**
+   * Finds the list, observes it and updates all entries. Only new or changed
+   * entries are read again; the others just re-check their extra data.
+   */
+  function tick() {
+    const url = location.pathname + location.search;
+    const replaced = Boolean(listRoot && !listRoot.isConnected);
+    if (replaced || url !== lastUrl) {
+      lastUrl = url;
+      resetTopList();
+    }
+    if (!listRoot || replaced) {
+      const items = page.findItems(document);
+      listRoot = items.length ? page.listRootOf(items) : null;
+      fullScanNeeded = true;
+    }
+    observe(listRoot || document.body);
+    if (listRoot) {
+      if (fullScanNeeded) {
+        if (!page.independentItems) itemCache = new WeakMap();
+        knownItems = new Set(page.findItems(listRoot));
+        fullScanNeeded = false;
+      }
+      for (const item of dirtyItems) itemCache.delete(item);
+      dirtyItems.clear();
+      processItems(knownItems);
+    }
+    updateTopList();
+    if (tooltipBadge && !tooltipBadge.isConnected) hideTooltip();
   }
 
   // ===========================================================================
@@ -2186,6 +2341,11 @@
       }
       .${PREFIX}-pill.${PREFIX}-neutral { color: #c7d5e0; }
       .${PREFIX}-pill.${PREFIX}-noreviews { border: 1px dashed #f2f6f9; }
+      .${PREFIX}-badge:focus { outline: none; }
+      .${PREFIX}-badge:focus-visible .${PREFIX}-pill {
+        outline: 2px solid #66c0f4;
+        outline-offset: 1px;
+      }
 
       .${PREFIX}-tooltip {
         position: fixed;
@@ -2494,6 +2654,18 @@
     ]);
   }
 
+  /**
+   * @param {{min: number, max: number, step: number}} limit
+   * @return {!Object<string, string>} min, max and step attributes.
+   */
+  function limitAttributes(limit) {
+    return {
+      min: String(limit.min),
+      max: String(limit.max),
+      step: String(limit.step),
+    };
+  }
+
   /** @return {!HTMLDialogElement} */
   function buildSettingsDialog() {
     const dialog = /** @type {!HTMLDialogElement} */ (buildElement('dialog', {
@@ -2515,9 +2687,7 @@
           id,
           name: `w.${key}`,
           type: 'number',
-          min: '0',
-          max: '1000',
-          step: '1',
+          ...limitAttributes(CONFIG.limits.weight),
           required: '',
         }),
         buildElement('span', {'class': `${PREFIX}-share`, 'data-share': key}),
@@ -2527,14 +2697,13 @@
     const other = buildElement('fieldset', {}, [
       buildElement('legend', {text: 'Other settings'}),
       buildNumberRow(
-          `${PREFIX}-ref`, 'Reference price (€)',
+          `${PREFIX}-ref`, `Reference price (${CURRENCY_SYMBOL})`,
           'At this final price the price component is 50.',
           buildElement('input', {
             id: `${PREFIX}-ref`,
             name: 'referencePrice',
             type: 'number',
-            min: '0.5',
-            step: '0.5',
+            ...limitAttributes(CONFIG.limits.referencePrice),
             required: '',
           })),
       buildCheckRow(
@@ -2581,8 +2750,10 @@
     });
     cacheButton.addEventListener('click', () => {
       const removed = cachePrune(true);
+      // Running requests discard their results; the badges switch to
+      // "pending" and request their data again on the next tick.
+      cacheEpoch++;
       histMem.clear();
-      settingsVersion++;
       schedule();
       status.textContent = `Cache cleared (${removed} entries).`;
     });
@@ -2590,7 +2761,7 @@
       event.preventDefault();
       if (!form.reportValidity()) return;
       settings = sanitizeSettings(readForm(form));
-      gmSet(STORAGE_SETTINGS, settings);
+      GM_setValue(STORAGE_SETTINGS, settings);
       settingsVersion++;
       pump();
       schedule();
@@ -2669,32 +2840,12 @@
     initTooltip();
     const pruned = cachePrune(false);
     if (pruned) log(`Removed ${pruned} expired cache entries`);
-    if (GM_API.registerMenuCommand) {
-      GM_API.registerMenuCommand('Deal Score: Settings …', openSettings);
-    }
+    GM_registerMenuCommand('Deal Score: Settings …', openSettings);
     observe(document.body);
     schedule();
-    // If the list is replaced entirely (e.g. when changing filters), the list
-    // observer does not notice.
-    setInterval(() => {
-      if (listRoot && !listRoot.isConnected) schedule();
-    }, 1000);
     if (DEBUG) {
       window.DealScore = {
-        core: {
-          parseMoney,
-          parsePriceLabel,
-          parsePriceTexts,
-          summarizeHistogram,
-          combineHistograms,
-          shrinkRating,
-          easeOut,
-          priceValue,
-          computeScore,
-          scoreColor,
-          buildTooltip,
-        },
-        config: CONFIG,
+        core: CORE,
         getSettings: () => settings,
         openSettings,
       };

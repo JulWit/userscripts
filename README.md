@@ -15,3 +15,20 @@ A collection of my personal userscripts.
 2. Click the **Install** link of a script above and confirm in the manager's dialog.
 
 Installed scripts update automatically from this repository.
+
+## Development
+
+No build step and no dependencies. With [Node.js](https://nodejs.org/) 18+:
+
+```bash
+node --test
+```
+
+runs the unit tests in `tests/`, and
+
+```bash
+npx -p typescript tsc -p jsconfig.json
+```
+
+type-checks the scripts against their JSDoc annotations (editors such as
+VS Code and Zed do this automatically via `jsconfig.json`).

@@ -17,6 +17,18 @@ A collection of personal userscripts, located in `scripts/` as `*.user.js` files
   whenever a script changes, so Violentmonkey picks up the update via
   `@updateURL` / `@downloadURL`.
 
+## Tests and type checking
+
+- Pure logic (parsing, scoring, formatting) is kept free of DOM, storage and
+  network access, so it can be unit-tested. A script exposes it to the tests
+  through a hook (see `dealScoreTestHook` in `steam-dealscore.user.js`) and
+  stops before touching the page.
+- Tests live in `tests/*.test.js` and use `node:test`; run them with
+  `node --test`.
+- Scripts are type-checked from their JSDoc annotations
+  (`tsc -p jsconfig.json`); GM_* declarations live in `types/`. Keep both
+  passing after every change.
+
 ## Git workflow
 
 - Do **not** create new branches.
