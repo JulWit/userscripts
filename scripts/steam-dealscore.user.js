@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Steam Wishlist – Deal Score
 // @namespace    https://store.steampowered.com/wishlist/dealscore
-// @version      1.10.1
-// @description  Deal score (1–100) for the wishlist, cart and store pages
+// @version      1.11.0
+// @description  Deal score (1–100) for the wishlist, cart and store pages, with a top-deals panel on the wishlist
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
 // @supportURL   https://github.com/JulWit/userscripts/issues
@@ -64,7 +64,7 @@
 
   /**
    * State of the extra data for one or more games.
-   * state: 'ok' | 'pending' | 'failed' | 'disabled' | 'unused'
+   * state: 'ok' | 'pending' | 'failed' | 'disabled'
    * @typedef {{state: string, hist: ?Histogram, t: (number|string),
    *     missing: (number|undefined)}}
    */
@@ -100,6 +100,7 @@
    *   status: string,
    *   score: (number|undefined),
    *   penalty: (number|undefined),
+   *   penaltyPoints: (number|undefined),
    *   parts: (!Object<string, !Object>|undefined),
    *   hasReviews: (boolean|undefined)
    * }}
@@ -107,10 +108,37 @@
   let ScoreResult;
 
   /**
+   * One row of the tooltip breakdown table.
+   * @typedef {{label: string, value: string, points: string, weight: string}}
+   */
+  let TooltipRow;
+
+  /**
+   * Content of the score tooltip. rows is empty when there is no breakdown.
+   * @typedef {{title: string, rows: !Array<!TooltipRow>, total: string,
+   *     notes: !Array<string>}}
+   */
+  let TooltipContent;
+
+  /**
    * Purchase option on the store page.
    * @typedef {{block: !Element, heading: !Element, price: !Price}}
    */
   let Offer;
+
+  /**
+   * Scored wishlist entry remembered for the top list. version is the
+   * settingsVersion the score was computed with.
+   * @typedef {{key: string, appid: string, title: string, price: !Price,
+   *     hist: ?Histogram, score: number, version: number}}
+   */
+  let TopEntry;
+
+  /**
+   * Preferences of the top list panel.
+   * @typedef {{size: number, collapsed: boolean}}
+   */
+  let PanelPrefs;
 
   // ===========================================================================
   // Configuration – all defaults in one place
@@ -180,6 +208,10 @@
     // Hover delay of the score tooltip (the native title tooltip waits
     // ~500 ms and does not work on touch devices).
     tooltipDelayMs: 100,
+
+    // Top list panel on the wishlist: selectable sizes and the default.
+    topListSizes: [10, 15, 20, 25, 50],
+    topListDefaultSize: 10,
   });
 
   // Locale-dependent patterns and formats – collected in one place. The
@@ -195,8 +227,9 @@
   const PREFIX = 'sws';
   const STORAGE_SETTINGS = 'settings';
   const STORAGE_CACHE_PREFIX = 'hist:';
-  const OWN_SELECTOR =
-      `.${PREFIX}-badge, .${PREFIX}-dialog, .${PREFIX}-tooltip`;
+  const STORAGE_PANEL = 'panel';
+  const OWN_SELECTOR = `.${PREFIX}-badge, .${PREFIX}-dialog, ` +
+      `.${PREFIX}-tooltip, .${PREFIX}-panel`;
 
   // ===========================================================================
   // Pure functions: parsing, score, color, tooltip (no DOM, no network)
@@ -449,17 +482,26 @@
     }
     if (weightSum <= 0) return {status: 'noWeights', parts};
 
+    // Points each component adds to the score (before the quality penalty).
+    for (const part of Object.values(parts)) {
+      part.points = part.available && part.weight > 0 ?
+          99 * part.weight * part.value / weightSum :
+          0;
+    }
+
     let total = weightedSum / weightSum;
     let penalty = 1;
+    let penaltyPoints = 0;
     const reviewWeight = weights.overall + weights.recent;
     if (settings.qualityPenalty && hasReviews && reviewWeight > 0) {
       const quality = (weights.overall * parts.overall.value +
           weights.recent * parts.recent.value) / reviewWeight;
       penalty = Math.min(1, 0.5 + quality);
+      penaltyPoints = 99 * total * (1 - penalty);
       total *= penalty;
     }
     const score = Math.min(100, Math.max(1, Math.round(1 + 99 * total)));
-    return {status: 'ok', score, penalty, parts, hasReviews};
+    return {status: 'ok', score, penalty, penaltyPoints, parts, hasReviews};
   }
 
   /**
@@ -550,69 +592,83 @@
   }
 
   /**
-   * Builds the multi-line tooltip with the breakdown.
+   * Builds the tooltip content: a table with the points each component adds
+   * to the score, followed by notes.
    * @param {!ScoreResult} result
-   * @param {string} extraState 'ok' | 'pending' | 'failed' | 'disabled' |
-   *     'unused'
+   * @param {string} extraState 'ok' | 'pending' | 'failed' | 'disabled'
    * @param {{bundleSize: (number|undefined), bundleMissing: (number|undefined),
    *     notes: (!Array<string>|undefined)}=} meta Bundle details and
    *     additional lines.
-   * @return {string}
+   * @return {!TooltipContent}
    */
   function buildTooltip(result, extraState, meta = {}) {
+    const message = (title, note) =>
+        ({title, rows: [], total: '', notes: note ? [note] : []});
     if (result.status === 'noPrice') {
-      return 'Deal score: –\n' +
-          'No price available (unreleased or not purchasable).';
+      return message('Deal score: –',
+          'No price available (unreleased or not purchasable).');
     }
     if (extraState === 'pending') {
-      return 'Deal score: loading extra data …';
+      return message('Deal score: loading extra data …', '');
     }
     if (result.status === 'noWeights') {
-      return 'Deal score: –\nAll weights of the available components are 0.';
+      return message('Deal score: –',
+          'All weights of the available components are 0.');
     }
     const parts = result.parts;
-    const points = (part) => Math.round(part.value * 100);
-    const weight = (part) => ` · weight ${formatInteger(part.weight)}`;
-    const rated = (part) => `→ ${points(part)}${weight(part)}`;
-    const lines = [`Deal score ${result.score}/100`];
+    /** @type {function(string, string, !Object): !TooltipRow} */
+    const row = (label, value, part) => part.available ?
+        {
+          label,
+          value,
+          points: `+${formatDecimal(part.points, 1)}`,
+          weight: formatInteger(part.weight),
+        } :
+        {label, value: 'no data (not counted)', points: '–', weight: '–'};
+    const rows = [{
+      label: 'Base',
+      value: '',
+      points: `+${formatDecimal(1, 1)}`,
+      weight: '',
+    }];
 
     const overall = parts.overall;
-    if (overall.available) {
-      lines.push(`Overall rating: ${formatPercent(overall.pct)} ` +
-          `(${formatInteger(overall.n)}, all languages) ${rated(overall)}`);
-    } else {
-      lines.push('Overall rating: no data (not counted)');
-    }
+    rows.push(row('Overall rating', overall.available ?
+        `${formatPercent(overall.pct)} (${formatInteger(overall.n)}, ` +
+            'all languages)' :
+        '', overall));
 
     const recent = parts.recent;
-    if (!recent.available) {
-      lines.push('Last 30 days: no data (not counted)');
-    } else if (!recent.n) {
-      lines.push(`Last 30 days: no new reviews ${rated(recent)}`);
-    } else {
-      lines.push(`Last 30 days: ${formatPercent(recent.pct)} ` +
-          `(${formatInteger(recent.n)}) ${rated(recent)}`);
+    let recentText = '';
+    if (recent.available) {
+      recentText = recent.n ?
+          `${formatPercent(recent.pct)} (${formatInteger(recent.n)})` :
+          'no new reviews';
     }
+    rows.push(row('Last 30 days', recentText, recent));
 
     const discount = parts.discount;
-    lines.push(discount.pct > 0 ?
-        `Discount: −${discount.pct}% ${rated(discount)}` :
-        `Discount: none → 0${weight(discount)}`);
+    rows.push(row('Discount',
+        discount.pct > 0 ? `−${discount.pct}%` : 'none', discount));
 
     const price = parts.price;
-    const priceText = price.free ? 'free' : formatMoney(price.amount);
-    lines.push(`Price: ${priceText} ${rated(price)}`);
+    rows.push(row('Price',
+        price.free ? 'free' : formatMoney(price.amount), price));
 
     const popularity = parts.popularity;
-    lines.push(popularity.available ?
-        `Popularity: ${formatInteger(popularity.n)} reviews ` +
-            rated(popularity) :
-        'Popularity: no data (not counted)');
+    rows.push(row('Popularity', popularity.available ?
+        `${formatInteger(popularity.n)} reviews` :
+        '', popularity));
 
     if (result.penalty < 1) {
-      lines.push(`Quality penalty: × ${formatDecimal(result.penalty, 2)}`);
+      rows.push({
+        label: 'Quality penalty',
+        value: `× ${formatDecimal(result.penalty, 2)}`,
+        points: `−${formatDecimal(result.penaltyPoints, 1)}`,
+        weight: '',
+      });
     }
-    lines.push(...(meta.notes || []));
+    const lines = [...(meta.notes || [])];
     if (meta.bundleSize) {
       const noun = meta.bundleSize === 1 ? 'title' : 'titles';
       lines.push(`Bundle: reviews of ${meta.bundleSize} included ` +
@@ -631,7 +687,12 @@
     } else if (!result.hasReviews) {
       lines.push('Note: no reviews yet – rating is not counted.');
     }
-    return lines.join('\n');
+    return {
+      title: `Deal score ${result.score}`,
+      rows,
+      total: String(result.score),
+      notes: lines,
+    };
   }
 
   // ===========================================================================
@@ -1539,10 +1600,7 @@
     // Set before getExtraFor: the queue checks for it.
     setData(badge, 'appids', data.appids.join(' '));
 
-    // Without a price there is no score, so the histogram is not requested.
-    const extra = data.price ?
-        getExtraFor(data.appids) :
-        {state: 'unused', hist: null, t: 0};
+    const extra = getExtraFor(data.appids);
     const sig = [
       data.key,
       data.appids.join(','),
@@ -1555,6 +1613,7 @@
 
     const result = renderBadge(badge, data, extra);
     badge.dataset.sig = sig;
+    rememberTopEntry(data, extra, result);
     if (report) {
       const hist = extra.hist;
       const reviews = hist ? hist.upTotal + hist.downTotal : null;
@@ -1696,6 +1755,7 @@
       dirtyItems.clear();
       processItems(knownItems);
     }
+    updateTopList();
     if (tooltipBadge && !tooltipBadge.isConnected) hideTooltip();
   }
 
@@ -1761,17 +1821,58 @@
     }
   }
 
+  /**
+   * @param {!TooltipContent} content
+   * @return {!Array<!HTMLElement>} Title, breakdown table and notes.
+   */
+  function buildTooltipNodes(content) {
+    const nodes = [buildElement(
+        'div', {class: `${PREFIX}-tooltip-title`, text: content.title})];
+    if (content.rows.length) {
+      const cell = (tag, text, cls = '') =>
+          buildElement(tag, cls ? {class: cls, text} : {text});
+      const num = `${PREFIX}-num`;
+      nodes.push(buildElement('table', {class: `${PREFIX}-tooltip-table`}, [
+        buildElement('thead', {}, [buildElement('tr', {}, [
+          cell('th', 'Component'),
+          cell('th', 'Value'),
+          cell('th', 'Points', num),
+          cell('th', 'Weight', num),
+        ])]),
+        buildElement('tbody', {}, content.rows.map((row) =>
+          buildElement('tr', {}, [
+            cell('th', row.label),
+            cell('td', row.value),
+            cell('td', row.points, num),
+            cell('td', row.weight, num),
+          ]))),
+        buildElement('tfoot', {}, [buildElement('tr', {}, [
+          cell('th', 'Score'),
+          cell('td', ''),
+          cell('td', content.total, num),
+          cell('td', ''),
+        ])]),
+      ]));
+    }
+    for (const note of content.notes) {
+      nodes.push(
+          buildElement('p', {class: `${PREFIX}-tooltip-note`, text: note}));
+    }
+    return nodes;
+  }
+
   /** Fills and positions the tooltip for the current badge. */
   function renderTooltip() {
     tooltipTimer = null;
     const badge = tooltipBadge;
-    const buildText = badge && badge.isConnected && tooltipTexts.get(badge);
-    if (!buildText) {
+    const buildContent =
+        badge && badge.isConnected && tooltipTexts.get(badge);
+    if (!buildContent) {
       hideTooltip();
       return;
     }
     const tooltip = tooltipElement();
-    tooltip.textContent = buildText();
+    tooltip.replaceChildren(...buildTooltipNodes(buildContent()));
     tooltip.hidden = false;
     badge.setAttribute('aria-describedby', tooltip.id);
     positionTooltip(tooltip, badge);
@@ -1853,6 +1954,201 @@
   }
 
   // ===========================================================================
+  // Top list panel (wishlist only)
+  // ===========================================================================
+
+  // The wishlist is virtualized: only the rows near the viewport exist. The
+  // panel therefore collects every scored row seen while scrolling.
+
+  /** @type {!Map<string, !TopEntry>} Scored entries seen so far, by key. */
+  const topEntries = new Map();
+  const topListEnabled = page instanceof WishlistPage;
+  let topListDirty = false;
+  let topListVersion = 0;
+  /** @type {?HTMLElement} */
+  let panelEl = null;
+  let panelSig = '';
+
+  /**
+   * @param {?Object} raw
+   * @return {!PanelPrefs}
+   */
+  function sanitizePanelPrefs(raw) {
+    const input = raw || {};
+    return {
+      size: CONFIG.topListSizes.includes(input.size) ?
+          input.size :
+          CONFIG.topListDefaultSize,
+      collapsed: input.collapsed === true,
+    };
+  }
+
+  /** @type {!PanelPrefs} */
+  const panelPrefs = sanitizePanelPrefs(gmGet(STORAGE_PANEL, null));
+
+  /**
+   * Remembers or forgets an entry after its badge was rendered.
+   * @param {!ItemData} data
+   * @param {!Extra} extra
+   * @param {!ScoreResult} result
+   */
+  function rememberTopEntry(data, extra, result) {
+    if (!topListEnabled) return;
+    if (result.status === 'ok' && extra.state !== 'pending') {
+      topEntries.set(data.key, {
+        key: data.key,
+        appid: data.id,
+        title: data.title,
+        price: /** @type {!Price} */ (data.price),
+        hist: extra.hist,
+        score: /** @type {number} */ (result.score),
+        version: settingsVersion,
+      });
+    } else {
+      topEntries.delete(data.key);
+    }
+    topListDirty = true;
+  }
+
+  /** Recomputes the scores of entries that are no longer rendered. */
+  function rescoreTopEntries() {
+    for (const entry of topEntries.values()) {
+      if (entry.version === settingsVersion) continue;
+      const hist = settings.fetchExtra ? entry.hist : null;
+      const result = computeScore(entry, hist, settings);
+      if (result.status === 'ok') {
+        entry.score = /** @type {number} */ (result.score);
+        entry.version = settingsVersion;
+      } else {
+        topEntries.delete(entry.key);
+      }
+    }
+  }
+
+  /** Updates the panel if entries, settings or preferences changed. */
+  function updateTopList() {
+    if (!topListEnabled) return;
+    if (!topListDirty && topListVersion === settingsVersion) return;
+    topListDirty = false;
+    if (topListVersion !== settingsVersion) {
+      rescoreTopEntries();
+      topListVersion = settingsVersion;
+    }
+    const ranked = [...topEntries.values()]
+        .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
+        .slice(0, panelPrefs.size);
+    const sig = [
+      topEntries.size,
+      panelPrefs.size,
+      panelPrefs.collapsed,
+      ...ranked.map((entry) => `${entry.key}:${entry.score}`),
+    ].join('|');
+    if (sig === panelSig && panelEl?.isConnected) return;
+    panelSig = sig;
+    renderPanel(ranked);
+  }
+
+  /** Saves the preferences and redraws the panel. */
+  function applyPanelPrefs() {
+    gmSet(STORAGE_PANEL, panelPrefs);
+    topListDirty = true;
+    updateTopList();
+  }
+
+  /** @return {!HTMLElement} The panel element, created on first use. */
+  function panelElement() {
+    if (panelEl && panelEl.isConnected) return panelEl;
+    const bodyId = `${PREFIX}-panel-body`;
+    const toggle = buildElement('button', {
+      'type': 'button',
+      'class': `${PREFIX}-panel-toggle`,
+      'aria-controls': bodyId,
+    });
+    const select = buildElement('select', {
+      'class': `${PREFIX}-panel-size`,
+      'aria-label': 'Number of titles',
+    });
+    for (const size of CONFIG.topListSizes) {
+      select.append(
+          buildElement('option', {value: String(size), text: `Top ${size}`}));
+    }
+    panelEl = buildElement('aside', {
+      'class': `${PREFIX}-panel`,
+      'aria-label': 'Best deals on this wishlist',
+    }, [
+      buildElement('div', {class: `${PREFIX}-panel-head`}, [toggle, select]),
+      buildElement('div', {class: `${PREFIX}-panel-body`, id: bodyId}, [
+        buildElement('ol', {class: `${PREFIX}-panel-list`}),
+        buildElement('p', {class: `${PREFIX}-panel-foot`}),
+      ]),
+    ]);
+    toggle.addEventListener('click', () => {
+      panelPrefs.collapsed = !panelPrefs.collapsed;
+      applyPanelPrefs();
+    });
+    select.addEventListener('change', () => {
+      panelPrefs.size = Number(select.value);
+      applyPanelPrefs();
+    });
+    document.body.appendChild(panelEl);
+    return panelEl;
+  }
+
+  /**
+   * @param {!Price} price
+   * @return {string} e.g. "€7.49 · −70%".
+   */
+  function formatPanelPrice(price) {
+    if (price.free) return 'Free';
+    const amount = formatMoney(price.final);
+    return price.discount > 0 ? `${amount} · −${price.discount}%` : amount;
+  }
+
+  /**
+   * Draws the panel.
+   * @param {!Array<!TopEntry>} ranked Best entries, in order.
+   */
+  function renderPanel(ranked) {
+    const panel = panelElement();
+    panel.hidden = topEntries.size === 0;
+    const toggle = panel.querySelector(`.${PREFIX}-panel-toggle`);
+    toggle.textContent = `${panelPrefs.collapsed ? '▸' : '▾'} Top deals`;
+    toggle.setAttribute('aria-expanded', String(!panelPrefs.collapsed));
+    panel.querySelector(`.${PREFIX}-panel-size`).value =
+        String(panelPrefs.size);
+    panel.querySelector(`.${PREFIX}-panel-body`).hidden =
+        panelPrefs.collapsed;
+    if (panelPrefs.collapsed) return;
+
+    panel.querySelector(`.${PREFIX}-panel-list`).replaceChildren(
+        ...ranked.map((entry) => {
+          const pill = buildElement(
+              'span', {class: `${PREFIX}-pill`, text: String(entry.score)});
+          pill.style.background = scoreColor(entry.score);
+          return buildElement('li', {}, [
+            buildElement('a', {
+              href: `/app/${entry.appid}/`,
+              target: '_blank',
+              rel: 'noopener',
+              title: entry.title,
+            }, [
+              pill,
+              buildElement(
+                  'span', {class: `${PREFIX}-panel-title`, text: entry.title}),
+              buildElement('span', {
+                class: `${PREFIX}-panel-price`,
+                text: formatPanelPrice(entry.price),
+              }),
+            ]),
+          ]);
+        }));
+    const noun = topEntries.size === 1 ? 'title' : 'titles';
+    panel.querySelector(`.${PREFIX}-panel-foot`).textContent =
+        `${formatInteger(topEntries.size)} ${noun} scored so far – ` +
+        'scroll through the wishlist to include more.';
+  }
+
+  // ===========================================================================
   // Styles & settings dialog
   // ===========================================================================
 
@@ -1905,12 +2201,150 @@
         color: #c7d5e0;
         font: 12px/1.5 "Motiva Sans", Arial, Helvetica, sans-serif;
         text-align: left;
-        white-space: pre-line;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
         pointer-events: none;
       }
-      .${PREFIX}-tooltip::first-line { font-weight: 700; color: #fff; }
       .${PREFIX}-tooltip[hidden] { display: none; }
+      .${PREFIX}-tooltip-title {
+        color: #fff;
+        font-weight: 700;
+      }
+      .${PREFIX}-tooltip-table {
+        margin-top: 4px;
+        border-collapse: collapse;
+      }
+      .${PREFIX}-tooltip-table th,
+      .${PREFIX}-tooltip-table td {
+        padding: 1px 6px;
+        font-weight: 400;
+        text-align: left;
+        vertical-align: top;
+      }
+      .${PREFIX}-tooltip-table th:first-child { padding-left: 0; }
+      .${PREFIX}-tooltip-table :is(th, td):last-child { padding-right: 0; }
+      .${PREFIX}-tooltip-table thead th {
+        border-bottom: 1px solid #3d4450;
+        color: #8f98a0;
+      }
+      .${PREFIX}-tooltip-table tfoot :is(th, td) {
+        border-top: 1px solid #3d4450;
+        color: #fff;
+        font-weight: 700;
+      }
+      .${PREFIX}-tooltip-table .${PREFIX}-num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .${PREFIX}-tooltip-note {
+        margin: 4px 0 0;
+        color: #8f98a0;
+      }
+
+      .${PREFIX}-panel {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 9999;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        width: min(340px, calc(100vw - 32px));
+        max-height: min(70vh, 600px);
+        border: 1px solid #3d4450;
+        border-radius: 6px;
+        background: #171d25;
+        color: #c7d5e0;
+        font: 13px/1.4 "Motiva Sans", Arial, Helvetica, sans-serif;
+        color-scheme: dark;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6);
+      }
+      .${PREFIX}-panel[hidden],
+      .${PREFIX}-panel-body[hidden] {
+        display: none;
+      }
+      .${PREFIX}-panel-head {
+        display: flex;
+        flex: none;
+        gap: 8px;
+        align-items: center;
+        padding: 6px 8px;
+      }
+      .${PREFIX}-panel-toggle {
+        flex: 1;
+        padding: 2px 4px;
+        border: 0;
+        background: none;
+        color: #fff;
+        font: 600 14px/1.4 "Motiva Sans", Arial, Helvetica, sans-serif;
+        text-align: left;
+        cursor: pointer;
+      }
+      .${PREFIX}-panel-size {
+        padding: 2px 4px;
+        border: 1px solid #3d4450;
+        border-radius: 3px;
+        background: #101822;
+        color: #fff;
+        font: inherit;
+      }
+      .${PREFIX}-panel-body {
+        min-height: 0;
+        overflow-y: auto;
+        border-top: 1px solid #3d4450;
+      }
+      .${PREFIX}-panel-list {
+        margin: 0;
+        padding: 4px 0;
+        list-style: none;
+        counter-reset: ${PREFIX}-rank;
+      }
+      .${PREFIX}-panel-list a {
+        display: grid;
+        grid-template-columns: 2em auto 1fr;
+        grid-template-areas:
+          "rank pill title"
+          "rank pill price";
+        column-gap: 8px;
+        align-items: center;
+        padding: 4px 10px;
+        color: inherit;
+        text-decoration: none;
+      }
+      .${PREFIX}-panel-list a:hover,
+      .${PREFIX}-panel-list a:focus-visible {
+        background: #2a3646;
+      }
+      .${PREFIX}-panel-list a::before {
+        counter-increment: ${PREFIX}-rank;
+        content: counter(${PREFIX}-rank) ".";
+        grid-area: rank;
+        color: #8f98a0;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .${PREFIX}-panel .${PREFIX}-pill {
+        grid-area: pill;
+        cursor: inherit;
+      }
+      .${PREFIX}-panel-title {
+        grid-area: title;
+        overflow: hidden;
+        color: #fff;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .${PREFIX}-panel-price {
+        grid-area: price;
+        color: #8f98a0;
+        font-size: 12px;
+      }
+      .${PREFIX}-panel-foot {
+        margin: 0;
+        padding: 6px 10px 8px;
+        color: #8f98a0;
+        font-size: 12px;
+      }
 
       .${PREFIX}-dialog {
         box-sizing: border-box;
