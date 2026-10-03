@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Wishlist – Deal Score
 // @namespace    https://store.steampowered.com/wishlist/dealscore
-// @version      1.10.0
+// @version      1.10.1
 // @description  Deal score (1–100) for the wishlist, cart and store pages
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -64,7 +64,7 @@
 
   /**
    * State of the extra data for one or more games.
-   * state: 'ok' | 'pending' | 'failed' | 'disabled'
+   * state: 'ok' | 'pending' | 'failed' | 'disabled' | 'unused'
    * @typedef {{state: string, hist: ?Histogram, t: (number|string),
    *     missing: (number|undefined)}}
    */
@@ -552,7 +552,8 @@
   /**
    * Builds the multi-line tooltip with the breakdown.
    * @param {!ScoreResult} result
-   * @param {string} extraState 'ok' | 'pending' | 'failed' | 'disabled'
+   * @param {string} extraState 'ok' | 'pending' | 'failed' | 'disabled' |
+   *     'unused'
    * @param {{bundleSize: (number|undefined), bundleMissing: (number|undefined),
    *     notes: (!Array<string>|undefined)}=} meta Bundle details and
    *     additional lines.
@@ -1538,7 +1539,10 @@
     // Set before getExtraFor: the queue checks for it.
     setData(badge, 'appids', data.appids.join(' '));
 
-    const extra = getExtraFor(data.appids);
+    // Without a price there is no score, so the histogram is not requested.
+    const extra = data.price ?
+        getExtraFor(data.appids) :
+        {state: 'unused', hist: null, t: 0};
     const sig = [
       data.key,
       data.appids.join(','),
