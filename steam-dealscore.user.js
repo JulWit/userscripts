@@ -1,9 +1,13 @@
 // ==UserScript==
 // @name         Steam-Wunschliste – Deal-Score
 // @namespace    https://store.steampowered.com/wishlist/dealscore
-// @version      1.8.0
+// @version      1.8.1
 // @description  Deal-Score (1–100) für Wunschliste, Warenkorb und Store-Seite
 // @author       Julian
+// @homepageURL  https://github.com/JulWit/userscripts
+// @supportURL   https://github.com/JulWit/userscripts/issues
+// @updateURL    https://raw.githubusercontent.com/JulWit/userscripts/main/steam-dealscore.user.js
+// @downloadURL  https://raw.githubusercontent.com/JulWit/userscripts/main/steam-dealscore.user.js
 // @match        https://store.steampowered.com/wishlist/*
 // @match        https://store.steampowered.com/cart*
 // @match        https://store.steampowered.com/app/*

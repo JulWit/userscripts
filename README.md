@@ -10,11 +10,14 @@ fließt als Bonus ein.
 ## Installation (Firefox + Violentmonkey)
 
 1. [Violentmonkey](https://addons.mozilla.org/firefox/addon/violentmonkey/) installieren (Tampermonkey geht auch).
-2. Violentmonkey-Dashboard öffnen → **+** → **Neu** und den Inhalt von `steam-dealscore.user.js` einfügen,
-   dann speichern. Alternativ die Datei per Drag & Drop auf das Dashboard ziehen.
-   Ist eine ältere Version installiert, wird sie dabei aktualisiert (gleicher Name und Namespace).
+2. **[Skript installieren](https://raw.githubusercontent.com/JulWit/userscripts/main/steam-dealscore.user.js)**
+   anklicken und im Violentmonkey-Dialog bestätigen.
 3. Die eigene Wunschliste öffnen, z. B. `https://store.steampowered.com/wishlist/profiles/<steamid>/`, oder den
    Einkaufswagen oder die Store-Seite eines Spiels.
+
+**Updates** kommen automatisch: Violentmonkey prüft regelmäßig, ob auf GitHub eine neue Version liegt. Sofort geht es
+über das Dashboard → **Nach Updates suchen**. Eine früher von Hand eingefügte Version vorher löschen, sonst fehlt ihr
+die Update-URL. Die Einstellungen bleiben dabei erhalten.
 
 ## Bedienung
 
