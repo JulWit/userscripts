@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Steam Wishlist – Deal Score
 // @namespace    https://store.steampowered.com/wishlist/dealscore
-// @version      1.12.0
+// @version      1.12.1
 // @description  Deal score (1–100) for the wishlist, cart and store pages, with a top-deals panel on the wishlist
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
 // @supportURL   https://github.com/JulWit/userscripts/issues
+// @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiMxYjI4MzgiLz48cGF0aCBkPSJNMTIgNDJhMjAgMjAgMCAwIDEgOC40LTE2LjMiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2Q5NDQzYiIgc3Ryb2tlLXdpZHRoPSI3Ii8+PHBhdGggZD0iTTIzLjYgMjMuOGEyMCAyMCAwIDAgMSAxNi44IDAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2U4YTUzMCIgc3Ryb2tlLXdpZHRoPSI3Ii8+PHBhdGggZD0iTTQzLjYgMjUuN0EyMCAyMCAwIDAgMSA1MiA0MiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNGZhZTNmIiBzdHJva2Utd2lkdGg9IjciLz48cGF0aCBkPSJNMzIgNDIgNDYgMjkiIHN0cm9rZT0iI2YyZjZmOSIgc3Ryb2tlLXdpZHRoPSI0IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjQyIiByPSI1IiBmaWxsPSIjNjZjMGY0Ii8+PHJlY3QgeD0iMTgiIHk9IjUwIiB3aWR0aD0iMjgiIGhlaWdodD0iNSIgcng9IjIuNSIgZmlsbD0iIzY2YzBmNCIgb3BhY2l0eT0iLjUiLz48L3N2Zz4K
 // @updateURL    https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/steam-dealscore.user.js
 // @downloadURL  https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/steam-dealscore.user.js
 // @match        https://store.steampowered.com/wishlist/*

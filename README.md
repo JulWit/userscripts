@@ -46,3 +46,12 @@ npm run test:e2e
 The fixture pages also work in a normal browser when served over HTTP from
 the repository root: `tests/fixtures/harness.js` stands in for
 Violentmonkey.
+
+Script icons live as SVG in `icons/` and are embedded in each script's
+`@icon` as a base64 data URI. After editing an icon, regenerate the URI:
+
+```bash
+echo "data:image/svg+xml;base64,$(base64 -w0 icons/reading-ruler.svg)"
+```
+
+`tests/icons.test.js` fails if a script's `@icon` and its SVG differ.

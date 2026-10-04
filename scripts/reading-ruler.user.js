@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Reading Ruler
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.1.0
+// @version      1.1.1
 // @description  Highlights one line of an article at a time: click or tap a line, then move with the arrow keys
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
 // @supportURL   https://github.com/JulWit/userscripts/issues
+// @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiMyYjJmMzYiLz48ZyBmaWxsPSIjOWFhM2FkIj48cmVjdCB4PSIxNCIgeT0iMTMiIHdpZHRoPSIzNiIgaGVpZ2h0PSI1IiByeD0iMi41Ii8+PHJlY3QgeD0iMTQiIHk9IjQ0IiB3aWR0aD0iMzYiIGhlaWdodD0iNSIgcng9IjIuNSIvPjxyZWN0IHg9IjE0IiB5PSI1NCIgd2lkdGg9IjI0IiBoZWlnaHQ9IjUiIHJ4PSIyLjUiIG9wYWNpdHk9Ii42Ii8+PHJlY3QgeD0iMTQiIHk9IjMiIHdpZHRoPSIzMCIgaGVpZ2h0PSI1IiByeD0iMi41IiBvcGFjaXR5PSIuNiIvPjwvZz48cmVjdCB4PSI2IiB5PSIyNCIgd2lkdGg9IjUyIiBoZWlnaHQ9IjE1IiByeD0iNCIgZmlsbD0iI2ZmYzQwMCIvPjxyZWN0IHg9IjE0IiB5PSIyOSIgd2lkdGg9IjM2IiBoZWlnaHQ9IjUiIHJ4PSIyLjUiIGZpbGw9IiMyYjJmMzYiLz48L3N2Zz4K
 // @updateURL    https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/reading-ruler.user.js
 // @downloadURL  https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/reading-ruler.user.js
 // @match        *://*/*
