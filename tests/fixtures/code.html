@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: long code block</title>
+<style>
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 16px/24px monospace;
+    margin: 0;
+  }
+
+  main {
+    margin: 16px auto;
+    width: 700px;
+  }
+
+  .keyword {
+    color: #a0a;
+  }
+
+  .name {
+    color: #00a;
+  }
+
+  .string {
+    color: #070;
+  }
+</style>
+</head>
+<body>
+<main>
+  <article>
+    <p id="intro">An article about code, with commas, clauses, and enough
+      words to make the article the content root of this page without any
+      doubt at all.</p>
+    <pre id="code"></pre>
+    <p>A closing paragraph after the code, again with commas, clauses, and
+      plenty of words to keep the content detection happy.</p>
+  </article>
+</main>
+<script>
+  // 2000 lines of highlighted code: 12000 text nodes, far more than the
+  // ruler measures at once.
+  const parts = [];
+  for (let line = 0; line < 2000; line++) {
+    parts.push(`<span class="keyword">const</span> ` +
+        `<span class="name">value${line}</span> = ` +
+        `<span class="string">'text ${line}'</span>;\n`);
+  }
+  document.getElementById('code').innerHTML = parts.join('');
+</script>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

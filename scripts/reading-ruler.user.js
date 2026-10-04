@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reading Ruler
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.1.2
+// @version      1.2.0
 // @description  Highlights one line of an article at a time: click or tap a line, then move with the arrow keys
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -13,6 +13,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_addValueChangeListener
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -25,6 +26,8 @@
  * next or previous line in reading order and keep it centered in the
  * viewport. The selection is stored as a text position, so it survives
  * reflows, and lines are only measured when needed.
+ * Known limitations: text inside shadow DOM (web components) cannot be
+ * selected, and text in a vertical writing mode is skipped.
  * Code style: Google JavaScript Style Guide, Google HTML/CSS Style Guide.
  */
 
@@ -225,6 +228,9 @@
     dragDistance: {mouse: 5, touch: 12},
     // Upper limit of text segments without visible lines skipped per move.
     maxSegmentScan: 200,
+    // Text nodes measured on each side of the selected one: a highlighted
+    // code block has thousands. Moving past them measures the next ones.
+    maxSegmentTexts: 200,
     // If the selected line was scrolled out of view, an arrow key selects a
     // visible line instead: points every visibleLineProbe px are probed.
     visibleLineProbe: 12,
@@ -390,16 +396,24 @@
   /**
    * Picks the line to enter when moving into a new segment: its first line
    * when moving down, its last when moving up. Lines that coincide with the
-   * current line are skipped.
-   * @param {!Array<!Box>} lines In reading order.
-   * @param {?Box} current
+   * current line are skipped. If the segment continues the current block
+   * (its next text nodes), a line at the height of the current one in the
+   * same column is the rest of that line, even without horizontal overlap.
+   * @param {!Array<!Line>} lines In reading order.
+   * @param {?Line} current
    * @param {number} direction 1 (down) or -1 (up).
+   * @param {boolean=} sameBlock Whether the segment continues the block of
+   *     the current line.
    * @return {number} Line index or -1.
    */
-  function pickEntryLine(lines, current, direction) {
+  function pickEntryLine(lines, current, direction, sameBlock = false) {
     for (let step = 0; step < lines.length; step++) {
       const index = direction > 0 ? step : lines.length - 1 - step;
-      if (!current || !isSameVisualLine(lines[index], current)) return index;
+      const line = lines[index];
+      const coincides = !!current && (sameBlock ?
+          line.column === current.column && onSameLine(line, current) :
+          isSameVisualLine(line, current));
+      if (!coincides) return index;
     }
     return -1;
   }
@@ -859,15 +873,28 @@
   }
 
   /**
-   * Adds or removes a site from the list of disabled sites.
+   * Adds a site to or removes it from the list of disabled sites. Setting
+   * the state explicitly (instead of toggling it) keeps a menu command of a
+   * tab with an outdated state from doing the opposite of its caption.
    * @param {!Array<string>} sites
    * @param {string} site
+   * @param {boolean} listed Whether the site should be in the list.
    * @return {!Array<string>} New list.
    */
-  function toggleSite(sites, site) {
-    return sites.includes(site) ?
-        sites.filter((entry) => entry !== site) :
-        [...sites, site];
+  function withSite(sites, site, listed) {
+    const others = sites.filter((entry) => entry !== site);
+    return listed ? [...others, site] : others;
+  }
+
+  /**
+   * @param {string} writingMode Computed writing-mode.
+   * @return {boolean} Whether text runs in horizontal lines; the ruler
+   *     handles only those.
+   */
+  function isHorizontalWritingMode(writingMode) {
+    return !writingMode || writingMode === 'horizontal-tb' ||
+        writingMode === 'lr' || writingMode === 'lr-tb' ||
+        writingMode === 'rl' || writingMode === 'rl-tb';
   }
 
   /**
@@ -911,7 +938,8 @@
     uncoveredBand,
     computeScrollTarget,
     withoutHash,
-    toggleSite,
+    withSite,
+    isHorizontalWritingMode,
     sanitizeSites,
   });
 
@@ -929,7 +957,8 @@
 
   // Script managers provide GM_* as local identifiers, not necessarily as
   // window properties.
-  /* global GM_getValue, GM_setValue, GM_registerMenuCommand */
+  /* global GM_getValue, GM_setValue, GM_registerMenuCommand,
+     GM_addValueChangeListener */
 
   if (!document.body) return;
 
@@ -1200,9 +1229,9 @@
   /**
    * Returns the block (paragraph, list item, heading …) whose lines contain a
    * text node, or null if the text is not selectable: blank, outside the
-   * content root, in an excluded element or in a link-heavy block. Text
-   * outside every block tag (a <div> with <br>, a table cell, <pre>) belongs
-   * to its nearest block-like ancestor.
+   * content root, in an excluded element, in a link-heavy block or in a
+   * vertical writing mode. Text outside every block tag (a <div> with <br>,
+   * a table cell, <pre>) belongs to its nearest block-like ancestor.
    * @param {!Text} text
    * @param {!Element} root
    * @return {?Element}
@@ -1225,7 +1254,10 @@
     }
     if (!block && BLOCK_TAGS.has(root.localName)) block = root;
     if (!block) block = container || (isBlockLike(root) ? root : null);
-    if (!block || isLinkHeavy(block)) return null;
+    if (!block || isLinkHeavy(block) ||
+        !isHorizontalWritingMode(styleOf(block).writingMode)) {
+      return null;
+    }
     return block;
   }
 
@@ -1413,24 +1445,32 @@
    * Collects the segment around a text node: the neighboring selectable text
    * nodes with the same block. Text of a block that is interrupted by a
    * nested block (a list inside a list item) forms separate segments, so the
-   * segments follow reading order.
+   * segments follow reading order. Long blocks (highlighted code) are cut
+   * into windows of CONFIG.maxSegmentTexts text nodes on each side; a
+   * segment entered while moving starts (or, moving up, ends) at the text
+   * node and extends twice as far in the direction of the move.
    * @param {!Text} text
    * @param {!Element} root
+   * @param {number=} direction 0 to center the window on the text node, 1
+   *     to start it there, -1 to end it there.
    * @return {?Segment}
    */
-  function segmentAround(text, root) {
+  function segmentAround(text, root, direction = 0) {
     const block = blockOf(text, root);
     if (!block) return null;
+    const limit = CONFIG.maxSegmentTexts;
+    const before = direction === 0 ? limit : (direction < 0 ? 2 * limit : 0);
+    const after = direction === 0 ? limit : (direction > 0 ? 2 * limit : 0);
     const walker = createWalker(root);
     const texts = [text];
     walker.currentNode = text;
-    while (walker.previousNode()) {
+    for (let count = 0; count < before && walker.previousNode(); count++) {
       const node = /** @type {!Text} */ (walker.currentNode);
       if (blockOf(node, root) !== block) break;
       texts.unshift(node);
     }
     walker.currentNode = text;
-    while (walker.nextNode()) {
+    for (let count = 0; count < after && walker.nextNode(); count++) {
       const node = /** @type {!Text} */ (walker.currentNode);
       if (blockOf(node, root) !== block) break;
       texts.push(node);
@@ -1439,7 +1479,8 @@
   }
 
   /**
-   * The segment before or after another one.
+   * The segment before or after another one: the next window of the same
+   * block, or the next block.
    * @param {!Segment} segment
    * @param {number} direction 1 (next) or -1 (previous).
    * @param {!Element} root
@@ -1451,7 +1492,9 @@
         segment.texts[segment.texts.length - 1] :
         segment.texts[0];
     const node = direction > 0 ? walker.nextNode() : walker.previousNode();
-    return node ? segmentAround(/** @type {!Text} */ (node), root) : null;
+    return node ?
+        segmentAround(/** @type {!Text} */ (node), root, direction) :
+        null;
   }
 
   /**
@@ -1697,6 +1740,13 @@
         background: transparent;
         box-shadow: none;
         outline: 2px solid highlight;
+      }
+    }
+
+    @media print {
+      .rr-ruler,
+      .rr-controls {
+        display: none;
       }
     }
   `;
@@ -2168,7 +2218,8 @@
         if (!next) break;
         segment = next;
         const layout = measureSegment(segment);
-        const entry = pickEntryLine(layout.lines, line, direction);
+        const entry = pickEntryLine(layout.lines, line, direction,
+            segment.block === current.segment.block);
         if (entry >= 0) {
           target = {segment, layout, index: entry};
           break;
@@ -2423,25 +2474,40 @@
         `Reading Ruler: Disable on ${SITE}` :
         `Reading Ruler: Enable on ${SITE}`;
     // The same id replaces the command, so the caption follows the state.
-    GM_registerMenuCommand(caption, toggleCurrentSite,
+    GM_registerMenuCommand(caption, onMenuCommand,
         {id: 'toggle-site', autoClose: true});
   }
 
-  /** Enables or disables the script for the current site. */
-  function toggleCurrentSite() {
-    const sites = toggleSite(
-        sanitizeSites(GM_getValue(CONFIG.storageDisabledSites, [])), SITE);
-    GM_setValue(CONFIG.storageDisabledSites, sites);
-    setEnabled(!sites.includes(SITE));
+  /**
+   * Applies a stored list of disabled sites to this tab.
+   * @param {*} value Stored value.
+   */
+  function applySites(value) {
+    setEnabled(!sanitizeSites(value).includes(SITE));
     registerMenu();
+  }
+
+  /**
+   * Does what the menu command's caption says: disables the script for the
+   * current site if it is enabled in this tab, enables it otherwise. Other
+   * tabs follow through the value change listener.
+   */
+  function onMenuCommand() {
+    const sites = withSite(
+        sanitizeSites(GM_getValue(CONFIG.storageDisabledSites, [])), SITE,
+        state.enabled);
+    GM_setValue(CONFIG.storageDisabledSites, sites);
+    applySites(sites);
   }
 
   /** Starts the script. */
   function init() {
-    const disabled =
-        sanitizeSites(GM_getValue(CONFIG.storageDisabledSites, []));
-    setEnabled(!disabled.includes(SITE));
-    registerMenu();
+    applySites(GM_getValue(CONFIG.storageDisabledSites, []));
+    // Changes from other tabs (remote) keep the menu and state in sync.
+    GM_addValueChangeListener(CONFIG.storageDisabledSites,
+        (name, oldValue, newValue, remote) => {
+          if (remote) applySites(newValue);
+        });
   }
 
   init();

@@ -9,6 +9,10 @@ declare function GM_getValue(key: string, defaultValue?: any): any;
 declare function GM_setValue(key: string, value: any): void;
 declare function GM_deleteValue(key: string): void;
 declare function GM_listValues(): string[];
+declare function GM_addValueChangeListener(
+    name: string,
+    callback: (name: string, oldValue: any, newValue: any,
+        remote: boolean) => void): string;
 declare function GM_registerMenuCommand(
     caption: string, onClick: (event: MouseEvent | KeyboardEvent) => void,
     options?: {id?: string, title?: string, autoClose?: boolean}): string;

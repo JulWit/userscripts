@@ -232,6 +232,38 @@ describe('article page', () => {
     await page.close();
   });
 
+  it('skips text in a vertical writing mode', async () => {
+    const page = await open('article.html');
+    await clickWord(page, '#vertical', '縦');
+    assert.equal(await ruler(page), null);
+    await page.close();
+  });
+
+  it('hides the highlight when printing', async () => {
+    const page = await open('article.html');
+    await clickWord(page, '#indented', 'aliquip');
+    await page.emulateMedia({media: 'print'});
+    const display = await page.evaluate(() => getComputedStyle(
+        document.querySelector('reading-ruler').shadowRoot
+            .querySelector('.rr-ruler')).display);
+    assert.equal(display, 'none');
+    await page.close();
+  });
+
+  it('follows a site switch made in another tab', async () => {
+    const page = await open('article.html');
+    await clickWord(page, '#indented', 'aliquip');
+    await page.evaluate(() => harnessSetRemoteValue('disabledSites',
+        [location.hostname]));
+    assert.equal(await ruler(page), null);
+    await clickWord(page, '#indented', 'aliquip');
+    assert.equal(await ruler(page), null);
+    await page.evaluate(() => harnessSetRemoteValue('disabledSites', []));
+    await clickWord(page, '#indented', 'aliquip');
+    assert.ok(await ruler(page));
+    await page.close();
+  });
+
   it('clears the selection with Escape', async () => {
     const page = await open('article.html');
     await clickWord(page, '#indented', 'aliquip');
@@ -254,6 +286,35 @@ describe('page without an article', () => {
     const page = await open('inbox.html');
     await clickWord(page, '#subject', 'planning');
     assert.equal(await ruler(page), null);
+    await page.close();
+  });
+});
+
+describe('long code block', () => {
+  it('moves line by line across the measured windows, quickly', async () => {
+    const page = await open('code.html');
+    await clickWord(page, '#code', 'value0');
+    let previous = await ruler(page);
+    const start = Date.now();
+    // 6 text nodes per line: 120 lines cross several windows of
+    // CONFIG.maxSegmentTexts text nodes.
+    const presses = 120;
+    for (let step = 0; step < presses; step++) {
+      await page.keyboard.press('ArrowDown');
+      const box = await ruler(page);
+      assert.ok(Math.abs(box.top - previous.top - 24) < 1,
+          `step ${step}: ${previous.top} → ${box.top}`);
+      previous = box;
+    }
+    // Generous: measuring the whole block took about 100 ms per press.
+    assert.ok((Date.now() - start) / presses < 60);
+    for (let step = 0; step < presses; step++) {
+      await page.keyboard.press('ArrowUp');
+      const box = await ruler(page);
+      assert.ok(Math.abs(previous.top - box.top - 24) < 1,
+          `step ${step} up: ${previous.top} → ${box.top}`);
+      previous = box;
+    }
     await page.close();
   });
 });

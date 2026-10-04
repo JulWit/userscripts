@@ -289,6 +289,25 @@ describe('pickEntryLine', () => {
     assert.equal(
         core.pickEntryLine([lines[0]], rect(100, 120, 0, 600), 1), -1);
   });
+
+  it('skips the rest of the current line in the next window of a block',
+      () => {
+        // The window ended in the middle of the line: the next one starts
+        // with its right part, which does not overlap the left part.
+        const current = line(100, 120, 0, 300, 0, 0);
+        const next = [line(100, 120, 300, 600, 0, 0),
+          line(130, 150, 0, 600, 1, 0)];
+        assert.equal(core.pickEntryLine(next, current, 1, true), 1);
+        // Another block side by side (a term and its definition) is a line
+        // of its own.
+        assert.equal(core.pickEntryLine(next, current, 1, false), 0);
+      });
+
+  it('enters a line of another column at the same height', () => {
+    const current = line(100, 120, 0, 300, 0, 0);
+    const next = [line(100, 120, 340, 640, 0, 1)];
+    assert.equal(core.pickEntryLine(next, current, 1, true), 0);
+  });
 });
 
 describe('pickColumnIndex and overlayBox', () => {
@@ -712,6 +731,18 @@ describe('computeScrollTarget', () => {
   });
 });
 
+describe('isHorizontalWritingMode', () => {
+  it('accepts horizontal and rejects vertical writing modes', () => {
+    for (const mode of ['', 'horizontal-tb', 'lr', 'rl-tb']) {
+      assert.ok(core.isHorizontalWritingMode(mode), mode);
+    }
+    for (const mode of ['vertical-rl', 'vertical-lr', 'sideways-rl',
+      'sideways-lr', 'tb-rl']) {
+      assert.ok(!core.isHorizontalWritingMode(mode), mode);
+    }
+  });
+});
+
 describe('withoutHash', () => {
   it('drops the fragment of a URL', () => {
     assert.equal(core.withoutHash('https://a.com/post?id=1#section-2'),
@@ -721,9 +752,17 @@ describe('withoutHash', () => {
 });
 
 describe('site list', () => {
-  it('toggles a site', () => {
-    assert.deepEqual(core.toggleSite(['a.com'], 'b.org'), ['a.com', 'b.org']);
-    assert.deepEqual(core.toggleSite(['a.com', 'b.org'], 'a.com'), ['b.org']);
+  it('adds and removes a site', () => {
+    assert.deepEqual(core.withSite(['a.com'], 'b.org', true),
+        ['a.com', 'b.org']);
+    assert.deepEqual(core.withSite(['a.com', 'b.org'], 'a.com', false),
+        ['b.org']);
+  });
+
+  it('sets the state instead of toggling it', () => {
+    // A tab with an outdated menu must not undo another tab's change.
+    assert.deepEqual(core.withSite(['a.com'], 'a.com', true), ['a.com']);
+    assert.deepEqual(core.withSite(['b.org'], 'a.com', false), ['b.org']);
   });
 
   it('sanitizes stored values', () => {

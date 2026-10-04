@@ -26,6 +26,32 @@ function GM_setValue(key, value) {
   harnessValues.set(key, value);
 }
 
+/** @type {!Array<{key: string, callback: !Function}>} */
+const harnessListeners = [];
+
+/**
+ * @param {string} key
+ * @param {!Function} callback
+ * @return {string}
+ */
+function GM_addValueChangeListener(key, callback) {
+  harnessListeners.push({key, callback});
+  return String(harnessListeners.length);
+}
+
+/**
+ * Stores a value as another tab would, and notifies the listeners.
+ * @param {string} key
+ * @param {*} value
+ */
+function harnessSetRemoteValue(key, value) {
+  const oldValue = harnessValues.get(key);
+  harnessValues.set(key, value);
+  for (const listener of harnessListeners) {
+    if (listener.key === key) listener.callback(key, oldValue, value, true);
+  }
+}
+
 /** @return {string} */
 function GM_registerMenuCommand() {
   return 'harness';
