@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: inbox</title>
+<style>
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 14px/20px sans-serif;
+    margin: 0;
+  }
+
+  td {
+    padding: 2px 8px;
+  }
+</style>
+</head>
+<body>
+<!-- A web app with a main landmark and plenty of text in table cells, but
+     no prose: the ruler stays off. -->
+<div role="main">
+  <table>
+    <tr>
+      <td>Alice Example</td>
+      <td id="subject">Quarterly planning meeting moved to Friday afternoon</td>
+    </tr>
+    <tr>
+      <td>Bob Example</td>
+      <td>Your invoice for September is ready to download now</td>
+    </tr>
+    <tr>
+      <td>Carol Example</td>
+      <td>Weekly report: numbers for the marketing dashboard</td>
+    </tr>
+    <tr>
+      <td>Dave Example</td>
+      <td>Reminder: please submit your travel expenses today</td>
+    </tr>
+    <tr>
+      <td>Erin Example</td>
+      <td>New comment on the design document for the launch</td>
+    </tr>
+    <tr>
+      <td>Frank Example</td>
+      <td>Lunch on Thursday? The new place around the corner</td>
+    </tr>
+  </table>
+</div>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

@@ -39,6 +39,11 @@
     top: 48px;
   }
 
+  dd {
+    display: inline;
+    margin: 0;
+  }
+
   .columns {
     column-count: 2;
     column-gap: 40px;
@@ -72,6 +77,13 @@
     <h2 class="sticky" id="sticky">A sticky section heading</h2>
     <div id="plain">Alpha line of a div without paragraphs<br>Bravo line
       after a line break<br>Charlie line after another break</div>
+    <!-- An inline <dd>: its client rects are its lines, not columns. -->
+    <dl id="terms">
+      <dt>Term</dt>
+      <dd id="definition">An inline definition that is long enough to wrap
+        onto several lines of the article column, ending with a short
+        last line.</dd>
+    </dl>
     <div class="columns">
       <p id="split">Columns one two three four five six seven eight nine
         ten eleven twelve thirteen fourteen fifteen sixteen seventeen

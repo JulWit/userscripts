@@ -148,6 +148,35 @@ describe('article page', () => {
     await page.close();
   });
 
+  it('treats the lines of an inline block as lines, not columns',
+      async () => {
+        const page = await open('article.html');
+        const lines = await page.evaluate(() => {
+          const range = document.createRange();
+          range.selectNodeContents(document.querySelector('#definition'));
+          const rects = [...range.getClientRects()].filter((r) => r.width);
+          const last = rects[rects.length - 1];
+          const column = document.querySelector('#terms')
+              .getBoundingClientRect();
+          return {
+            last: {top: last.top + window.scrollY,
+              bottom: last.bottom + window.scrollY},
+            // Right of the short last line, inside the column.
+            click: {x: (last.right + column.right) / 2,
+              y: (last.top + last.bottom) / 2},
+            columnLeft: column.left + window.scrollX,
+            columnRight: column.right + window.scrollX,
+          };
+        });
+        await page.mouse.click(lines.click.x, lines.click.y);
+        const box = await ruler(page);
+        assert.ok(covers(box, lines.last));
+        // The highlight spans the column, not just the short line.
+        assert.ok(box.left <= lines.columnLeft);
+        assert.ok(box.right >= lines.columnRight);
+        await page.close();
+      });
+
   it('moves from the left to the right CSS column', async () => {
     const page = await open('article.html');
     const lines = await page.evaluate(() => {
@@ -217,6 +246,13 @@ describe('page without an article', () => {
     const page = await open('webapp.html');
     await clickWord(page, '#message', 'Meeting');
     await clickWord(page, '#status', 'messages');
+    assert.equal(await ruler(page), null);
+    await page.close();
+  });
+
+  it('leaves a web app with a main landmark alone', async () => {
+    const page = await open('inbox.html');
+    await clickWord(page, '#subject', 'planning');
     assert.equal(await ruler(page), null);
     await page.close();
   });

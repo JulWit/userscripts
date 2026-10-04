@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reading Ruler
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.1.1
+// @version      1.1.2
 // @description  Highlights one line of an article at a time: click or tap a line, then move with the arrow keys
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -139,8 +139,10 @@
     blockTags: ['p', 'li', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
       'dt', 'dd'],
     headingTags: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
-    // Elements that hold body text without paragraphs (text with <br>, table
-    // cells, code). They count as paragraphs when they contain no block.
+    // Elements that may hold body text without paragraphs. For the content
+    // detection they count as paragraphs only if they contain no block and
+    // break their text with <br> (or are <pre>): table cells and divs of web
+    // apps hold text too, but not prose.
     textContainerTags: ['div', 'section', 'td', 'pre', 'figcaption'],
     // Text outside every block tag belongs to its nearest ancestor with one
     // of these computed display values.
@@ -627,6 +629,18 @@
   }
 
   /**
+   * Whether an element without nested blocks counts as a paragraph for the
+   * content detection.
+   * @param {string} tagName Lower case.
+   * @param {boolean} hasLineBreak Whether it has a <br> child.
+   * @return {boolean}
+   */
+  function countsAsParagraph(tagName, hasLineBreak) {
+    return CONFIG.blockTags.includes(tagName) || tagName === 'pre' ||
+        (CONFIG.textContainerTags.includes(tagName) && hasLineBreak);
+  }
+
+  /**
    * Whether a container holds enough paragraph text to be the content root.
    * @param {!Array<{textLength: number}>} paragraphs
    * @return {boolean}
@@ -887,6 +901,7 @@
     isExcludedName,
     classWeight,
     countCommas,
+    countsAsParagraph,
     hasEnoughText,
     paragraphScore,
     ancestorShare,
@@ -1220,13 +1235,16 @@
 
   /**
    * Paragraph-like elements below a container without nested ones: the
-   * actual paragraphs, list items, headings and text containers.
+   * actual paragraphs, list items, headings, and text containers that break
+   * their text into lines (see countsAsParagraph).
    * @param {!Element} container
    * @return {!Array<!Element>}
    */
   function leafBlocks(container) {
     return [...container.querySelectorAll(PARAGRAPH_SELECTOR)].filter(
-        (block) => !block.querySelector(PARAGRAPH_SELECTOR));
+        (block) => !block.querySelector(PARAGRAPH_SELECTOR) &&
+            countsAsParagraph(block.localName,
+                !!block.querySelector(':scope > br')));
   }
 
   /**
@@ -1437,18 +1455,37 @@
   }
 
   /**
-   * Content boxes of a block (without padding and border), one per fragment
-   * (e.g. CSS columns).
+   * The element whose boxes form the text column of a block: the block
+   * itself, or for a block displayed inline (a <dd> next to its term), whose
+   * client rects are its lines, the nearest ancestor with boxes of its own.
+   * @param {!Element} block
+   * @return {!Element}
+   */
+  function columnElementOf(block) {
+    /** @type {!Element} */
+    let element = block;
+    while (element.parentElement) {
+      const display = styleOf(element).display;
+      if (display !== 'inline' && display !== 'contents') break;
+      element = element.parentElement;
+    }
+    return element;
+  }
+
+  /**
+   * Content boxes of a block's text column (without padding and border), one
+   * per fragment (e.g. CSS columns).
    * @param {!Element} block
    * @return {!Array<!Box>}
    */
   function contentBoxes(block) {
-    const style = styleOf(block);
+    const column = columnElementOf(block);
+    const style = styleOf(column);
     const left = (parseFloat(style.paddingLeft) || 0) +
         (parseFloat(style.borderLeftWidth) || 0);
     const right = (parseFloat(style.paddingRight) || 0) +
         (parseFloat(style.borderRightWidth) || 0);
-    return [...block.getClientRects()].map((rect) => ({
+    return [...column.getClientRects()].map((rect) => ({
       top: rect.top,
       bottom: rect.bottom,
       left: rect.left + left,
@@ -2079,10 +2116,13 @@
    * @return {?LineRef} null if the selected line is in view or no line is.
    */
   function lineInViewInstead(current, root, direction) {
-    const column = columnOf(current);
     const scroller = scrollContainersOf(current.segment.block)[0] || null;
+    // A line still in the view is moved from as usual, even if a fixed
+    // header covers it. Only probing for a visible line needs the headers.
+    const line = current.layout.lines[current.index];
+    if (!isOutsideBand(line, viewOf(scroller))) return null;
+    const column = columnOf(current);
     const band = visibleBand(scroller, column);
-    if (!isOutsideBand(current.layout.lines[current.index], band)) return null;
     const x = clamp((column.left + column.right) / 2, 1,
         document.documentElement.clientWidth - 2);
     for (const y of probeHeights(band, CONFIG.visibleLineProbe, direction)) {

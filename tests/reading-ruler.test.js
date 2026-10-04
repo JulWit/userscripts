@@ -524,6 +524,18 @@ describe('container scoring', () => {
     assert.equal(div - comments, 25);
   });
 
+  it('counts text containers as paragraphs only with line breaks', () => {
+    assert.ok(core.countsAsParagraph('p', false));
+    assert.ok(core.countsAsParagraph('li', false));
+    assert.ok(core.countsAsParagraph('pre', false));
+    assert.ok(core.countsAsParagraph('div', true));
+    assert.ok(core.countsAsParagraph('td', true));
+    // Cells and divs of web apps (mail lists, dashboards) hold no prose.
+    assert.ok(!core.countsAsParagraph('div', false));
+    assert.ok(!core.countsAsParagraph('td', false));
+    assert.ok(!core.countsAsParagraph('span', true));
+  });
+
   it('requires a minimum of paragraph text', () => {
     const {minText} = core.config.scoring;
     assert.ok(core.hasEnoughText([{textLength: minText}]));
