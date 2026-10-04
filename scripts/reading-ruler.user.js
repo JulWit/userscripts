@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reading Ruler
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.0.0
+// @version      1.1.0
 // @description  Highlights one line of an article at a time: click or tap a line, then move with the arrow keys
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -40,11 +40,17 @@
    */
 
   /**
-   * Client rect of a text fragment; source identifies the fragment. A line
-   * has the same shape: the union of its fragments, with the source of its
-   * first fragment in document order.
+   * Client rect of a text fragment; source identifies the fragment.
    * @typedef {{top: number, bottom: number, left: number, right: number,
-   *     source: number}} Line
+   *     source: number}} Fragment
+   */
+
+  /**
+   * Visual line: the union of its fragments, with the source of its first
+   * fragment in document order. column is the index of the block's box the
+   * line lies in (a block split by CSS columns has several), 0 otherwise.
+   * @typedef {{top: number, bottom: number, left: number, right: number,
+   *     source: number, column: number}} Line
    */
 
   /** @typedef {{left: number, right: number}} Span */
@@ -85,8 +91,10 @@
    *     maxScrollTop: number}} ScrollInput
    */
 
-  /** Selected position: a character in a text node. */
-  /** @typedef {{node: !Text, offset: number}} Anchor */
+  /**
+   * Selected position: a character in a text node.
+   * @typedef {{node: !Text, offset: number}} Anchor
+   */
 
   /**
    * Consecutive selectable text nodes in document order that share a block.
@@ -95,10 +103,11 @@
 
   /**
    * Measured lines of a segment; fragments maps a line source to the text
-   * node and the index of the client rect within that node.
+   * node and the index of the client rect within that node, columns holds
+   * the content boxes of the block.
    * @typedef {{lines: !Array<!Line>,
-   *     fragments: !Array<{textIndex: number,
-   *     rectIndex: number}>}} SegmentLayout
+   *     fragments: !Array<{textIndex: number, rectIndex: number}>,
+   *     columns: !Array<!Box>}} SegmentLayout
    */
 
   /**
@@ -129,6 +138,13 @@
     blockTags: ['p', 'li', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
       'dt', 'dd'],
     headingTags: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
+    // Elements that hold body text without paragraphs (text with <br>, table
+    // cells, code). They count as paragraphs when they contain no block.
+    textContainerTags: ['div', 'section', 'td', 'pre', 'figcaption'],
+    // Text outside every block tag belongs to its nearest ancestor with one
+    // of these computed display values.
+    blockDisplays: ['block', 'flow-root', 'list-item', 'table-cell',
+      'table-caption'],
     // Subtrees without body text. A header is only skipped outside an
     // article: inside, it holds the article's title.
     excludedTags: ['nav', 'aside', 'footer', 'button', 'select', 'textarea',
@@ -167,12 +183,18 @@
     // minParagraphLength are ignored, scores are passed up maxDepth levels.
     // The parent of the best container wins if it scores at least
     // parentRatio of the best score, or if a sibling scores siblingRatio.
+    // The winner needs minText characters of paragraph text; pages without
+    // such a container (web apps, link lists) are left alone.
     scoring: {
       minParagraphLength: 25,
       maxDepth: 5,
       parentRatio: 0.75,
       siblingRatio: 0.2,
+      minText: 500,
     },
+    // Minimum time between two detections of the content root in ms, while
+    // the page keeps changing its DOM.
+    redetectInterval: 1000,
     // An article or main element needs this much paragraph text. A nested
     // one is preferred if it holds semanticDominance of the outer's text.
     minSemanticText: 250,
@@ -200,6 +222,9 @@
     dragDistance: {mouse: 5, touch: 12},
     // Upper limit of text segments without visible lines skipped per move.
     maxSegmentScan: 200,
+    // If the selected line was scrolled out of view, an arrow key selects a
+    // visible line instead: points every visibleLineProbe px are probed.
+    visibleLineProbe: 12,
     // Floating up/down buttons are shown for this primary pointer.
     touchQuery: '(pointer: coarse)',
     reducedMotionQuery: '(prefers-reduced-motion: reduce)',
@@ -259,11 +284,14 @@
    * Groups the client rects of a run of text into visual lines. Inline
    * elements such as links and emphasis split a line into several rects;
    * they are merged. Empty rects and unusually tall ones (drop caps) are
-   * ignored.
-   * @param {!Array<!Line>} rects Fragment rects in document order.
-   * @return {!Array<!Line>} Lines from top to bottom.
+   * ignored. In a block split by CSS columns, only rects of the same column
+   * are merged.
+   * @param {!Array<!Fragment>} rects Fragment rects in document order.
+   * @param {!Array<!Box>=} columns Content boxes of the block.
+   * @return {!Array<!Line>} Lines in reading order: by column, then from top
+   *     to bottom.
    */
-  function groupRectsIntoLines(rects) {
+  function groupRectsIntoLines(rects, columns = []) {
     const usable = rects.filter(
         (rect) => rect.right > rect.left && rect.bottom > rect.top);
     if (!usable.length) return [];
@@ -275,28 +303,33 @@
     const lines = [];
     for (const rect of usable) {
       if (usable.length >= 3 && rect.bottom - rect.top > maxHeight) continue;
-      const line = lines.find((candidate) => onSameLine(candidate, rect));
+      const column =
+          columns.length > 1 ? Math.max(0, pickColumnIndex(columns, rect)) : 0;
+      const line = lines.find((candidate) =>
+        candidate.column === column && onSameLine(candidate, rect));
       if (line) {
         line.top = Math.min(line.top, rect.top);
         line.bottom = Math.max(line.bottom, rect.bottom);
         line.left = Math.min(line.left, rect.left);
         line.right = Math.max(line.right, rect.right);
       } else {
-        lines.push({...rect});
+        lines.push({...rect, column});
       }
     }
-    return lines.sort((a, b) => a.top - b.top);
+    return lines.sort((a, b) => a.column - b.column || a.top - b.top);
   }
 
   /**
-   * @param {!Array<!Box>} lines Sorted top to bottom.
+   * @param {!Array<!Line>} lines In reading order.
    * @param {number} y
+   * @param {number=} column Only lines of this column; -1 for all.
    * @return {number} Index of the line closest to y, -1 without lines.
    */
-  function nearestLineIndex(lines, y) {
+  function nearestLineIndex(lines, y, column = -1) {
     let best = -1;
     let bestDistance = Infinity;
     lines.forEach((line, index) => {
+      if (column >= 0 && line.column !== column) return;
       const distance = Math.max(line.top - y, y - line.bottom, 0);
       if (distance < bestDistance) {
         best = index;
@@ -318,20 +351,26 @@
 
   /**
    * Finds the line at a click position. A line covers its highlight padding
-   * and half of the gap to its neighbors, so a click between two lines of a
-   * paragraph still hits one of them.
-   * @param {!Array<!Box>} lines Sorted top to bottom.
+   * and half of the gap to its neighbors in the same column, so a click
+   * between two lines of a paragraph still hits one of them.
+   * @param {!Array<!Line>} lines In reading order.
    * @param {number} y
+   * @param {number=} column Only lines of this column; -1 for all.
    * @return {number} Line index, -1 if y is outside every line.
    */
-  function lineIndexAt(lines, y) {
+  function lineIndexAt(lines, y, column = -1) {
     let best = -1;
     let bestDistance = Infinity;
     lines.forEach((line, index) => {
+      if (column >= 0 && line.column !== column) return;
+      const above = lines[index - 1];
+      const below = lines[index + 1];
       const pad = paddingY(line);
-      const gapAbove = index > 0 ? (line.top - lines[index - 1].bottom) / 2 : 0;
-      const gapBelow = index < lines.length - 1 ?
-          (lines[index + 1].top - line.bottom) / 2 :
+      const gapAbove = above && above.column === line.column ?
+          (line.top - above.bottom) / 2 :
+          0;
+      const gapBelow = below && below.column === line.column ?
+          (below.top - line.bottom) / 2 :
           0;
       const top = line.top - Math.max(pad, gapAbove);
       const bottom = line.bottom + Math.max(pad, gapBelow);
@@ -349,7 +388,7 @@
    * Picks the line to enter when moving into a new segment: its first line
    * when moving down, its last when moving up. Lines that coincide with the
    * current line are skipped.
-   * @param {!Array<!Box>} lines Sorted top to bottom.
+   * @param {!Array<!Box>} lines In reading order.
    * @param {?Box} current
    * @param {number} direction 1 (down) or -1 (up).
    * @return {number} Line index or -1.
@@ -363,27 +402,27 @@
   }
 
   /**
-   * Picks the box of a block that contains a line. A block split across CSS
-   * columns has several boxes.
+   * Picks the box of a block that contains a line or point. A block split
+   * across CSS columns has several boxes.
    * @param {!Array<!Box>} boxes Content boxes of the block.
    * @param {!Box} line
-   * @return {?Box}
+   * @return {number} Index of the box, -1 without usable boxes.
    */
-  function pickColumn(boxes, line) {
-    let best = null;
+  function pickColumnIndex(boxes, line) {
+    let best = -1;
     let bestDistance = Infinity;
-    for (const box of boxes) {
-      if (box.right <= box.left) continue;
+    boxes.forEach((box, index) => {
+      if (box.right <= box.left) return;
       const gapY = Math.max(0, -verticalOverlap(box, line));
       const gapX = Math.max(0,
           Math.max(box.left, line.left) - Math.min(box.right, line.right));
       // A box at the height of the line wins over one beside it.
       const distance = gapY * 1000 + gapX;
       if (distance < bestDistance) {
-        best = box;
+        best = index;
         bestDistance = distance;
       }
-    }
+    });
     return best;
   }
 
@@ -438,6 +477,78 @@
       if (!/\s/.test(text[index])) return index;
     }
     return Math.max(0, Math.min(from, text.length - 1));
+  }
+
+  /**
+   * Finds the first visible character of a line within a text node that
+   * spans several lines, by binary search over the character positions.
+   * Collapsed white space has no rect; it is judged by the next visible
+   * character, which keeps the search predicate monotonic.
+   * @param {number} length Length of the text.
+   * @param {(index: number) => ?Box} rectAt Rect of a character, null if it
+   *     is not rendered.
+   * @param {!Line} line
+   * @param {!Array<!Box>} columns Content boxes of the block.
+   * @return {number} Offset of the character; length if there is none.
+   */
+  function lineStartOffset(length, rectAt, line, columns) {
+    /**
+     * @param {number} from
+     * @return {?{index: number, rect: !Box}} First rendered character at or
+     *     after from.
+     */
+    const visibleFrom = (from) => {
+      for (let index = from; index < length; index++) {
+        const rect = rectAt(index);
+        if (rect) return {index, rect};
+      }
+      return null;
+    };
+    const start = findFirst(0, length, (index) => {
+      const visible = visibleFrom(index);
+      if (!visible) return true;
+      const column = columns.length > 1 ?
+          Math.max(0, pickColumnIndex(columns, visible.rect)) :
+          0;
+      if (column !== line.column) return column > line.column;
+      return (visible.rect.top + visible.rect.bottom) / 2 >= line.top;
+    });
+    const visible = visibleFrom(start);
+    return visible ? visible.index : length;
+  }
+
+  /**
+   * @param {!Box} line
+   * @param {!Band} band
+   * @return {boolean} Whether the line lies completely outside the band.
+   */
+  function isOutsideBand(line, band) {
+    return line.bottom <= band.top || line.top >= band.bottom;
+  }
+
+  /**
+   * @param {!Box} line
+   * @param {!Band} band
+   * @return {boolean} Whether the line lies completely inside the band.
+   */
+  function isInsideBand(line, band) {
+    return line.top >= band.top && line.bottom <= band.bottom;
+  }
+
+  /**
+   * Heights at which to look for a visible line: from the top of the band
+   * downwards, or from its bottom upwards.
+   * @param {!Band} band
+   * @param {number} step
+   * @param {number} direction 1 (from the top) or -1 (from the bottom).
+   * @return {!Array<number>}
+   */
+  function probeHeights(band, step, direction) {
+    const heights = [];
+    for (let y = band.top + step / 2; y < band.bottom; y += step) {
+      heights.push(y);
+    }
+    return direction > 0 ? heights : heights.reverse();
   }
 
   /**
@@ -512,6 +623,17 @@
    */
   function countCommas(text) {
     return (text.match(/[,،、，]/g) || []).length;
+  }
+
+  /**
+   * Whether a container holds enough paragraph text to be the content root.
+   * @param {!Array<{textLength: number}>} paragraphs
+   * @return {boolean}
+   */
+  function hasEnoughText(paragraphs) {
+    let total = 0;
+    for (const paragraph of paragraphs) total += paragraph.textLength;
+    return total >= CONFIG.scoring.minText;
   }
 
   /**
@@ -712,6 +834,16 @@
   }
 
   /**
+   * @param {string} href
+   * @return {string} The URL without its fragment: jumping to an anchor on
+   *     the same page keeps the page.
+   */
+  function withoutHash(href) {
+    const index = href.indexOf('#');
+    return index < 0 ? href : href.slice(0, index);
+  }
+
+  /**
    * Adds or removes a site from the list of disabled sites.
    * @param {!Array<string>} sites
    * @param {string} site
@@ -742,14 +874,19 @@
     nearestLineIndex,
     lineIndexAt,
     pickEntryLine,
-    pickColumn,
+    pickColumnIndex,
     overlayBox,
     findFirst,
     firstNonSpace,
+    lineStartOffset,
+    isOutsideBand,
+    isInsideBand,
+    probeHeights,
     nameTokens,
     isExcludedName,
     classWeight,
     countCommas,
+    hasEnoughText,
     paragraphScore,
     ancestorShare,
     scoreContainer,
@@ -757,6 +894,7 @@
     chooseSemanticRoot,
     uncoveredBand,
     computeScrollTarget,
+    withoutHash,
     toggleSite,
     sanitizeSites,
   });
@@ -770,7 +908,7 @@
   }
 
   // ===========================================================================
-  // Classifying elements and text
+  // State
   // ===========================================================================
 
   // Script managers provide GM_* as local identifiers, not necessarily as
@@ -779,11 +917,89 @@
 
   if (!document.body) return;
 
+  /**
+   * @typedef {{host: !HTMLElement, ruler: !HTMLElement,
+   *     controls: !HTMLElement}} Ui
+   */
+
+  /**
+   * Per-operation caches: page styles can change at any time, so they only
+   * live for one click, key press or refresh.
+   * @typedef {{style: !WeakMap<!Element, !CSSStyleDeclaration>,
+   *     exclusion: !WeakMap<!Element, string>,
+   *     linkDensity: !WeakMap<!Element, number>}} Caches
+   */
+
+  /**
+   * Mutable state of the script.
+   * @typedef {Object} State
+   * @property {boolean} enabled Whether the input listeners are attached.
+   * @property {?Anchor} anchor The selected line, as the text position of
+   *     its start.
+   * @property {?Ui} ui Highlight and touch controls, created on first use.
+   * @property {?Placement} placement Current position of the highlight.
+   * @property {?{block: !Element, value: string}} signature Layout of the
+   *     selected block when the highlight was placed (see layoutSignature).
+   * @property {?{x: number, y: number, type: string}} pointerDown Last
+   *     pointer press, to tell clicks from drags.
+   * @property {?{element: ?Element, key: string, time: number}} root
+   *     Detected content root (null on pages without article-like content)
+   *     with the page it belongs to and the time of detection.
+   * @property {boolean} rootDirty Whether the DOM changed since the content
+   *     root was detected.
+   * @property {?MutationObserver} rootWatcher Sets rootDirty.
+   * @property {boolean} refreshPending
+   * @property {?ResizeObserver} resizeObserver
+   * @property {?MutationObserver} mutationObserver
+   * @property {?Element} observedBlock Selected block, observed for resizes.
+   * @property {?Element} observedRoot Content root, observed for mutations.
+   * @property {!Caches} caches
+   */
+
+  /** @return {!Caches} */
+  function newCaches() {
+    return {
+      style: new WeakMap(),
+      exclusion: new WeakMap(),
+      linkDensity: new WeakMap(),
+    };
+  }
+
+  /** @type {!State} */
+  const state = {
+    enabled: false,
+    anchor: null,
+    ui: null,
+    placement: null,
+    signature: null,
+    pointerDown: null,
+    root: null,
+    rootDirty: false,
+    rootWatcher: null,
+    refreshPending: false,
+    resizeObserver: null,
+    mutationObserver: null,
+    observedBlock: null,
+    observedRoot: null,
+    caches: newCaches(),
+  };
+
+  /** Starts an operation with fresh caches. */
+  function beginOperation() {
+    state.caches = newCaches();
+  }
+
+  // ===========================================================================
+  // Classifying elements and text
+  // ===========================================================================
+
   const BLOCK_TAGS = new Set(CONFIG.blockTags);
   const HEADING_TAGS = new Set(CONFIG.headingTags);
   const EXCLUDED_TAGS = new Set(CONFIG.excludedTags);
   const EXCLUDED_ROLES = new Set(CONFIG.excludedRoles);
-  const BLOCK_SELECTOR = CONFIG.blockTags.join(', ');
+  // Paragraph-like elements for the content detection.
+  const PARAGRAPH_SELECTOR =
+      [...CONFIG.blockTags, ...CONFIG.textContainerTags].join(', ');
   const SEMANTIC_SELECTOR = 'article, main, [role="main"]';
   // Clicks on these keep their normal behavior.
   const INTERACTIVE_SELECTOR = [
@@ -798,24 +1014,24 @@
     '[role="slider"]', '[role="listbox"]', '[role="menu"]', '[role="menubar"]',
     '[role="tablist"]', '[role="grid"]', '[role="tree"]', '[role="treegrid"]',
     '[role="radiogroup"]', '[role="combobox"]', '[role="spinbutton"]',
-    '[role="scrollbar"]', 'audio', 'video',
+    '[role="scrollbar"]', '[role="textbox"]', '[role="searchbox"]',
+    '[role="application"]', 'audio', 'video',
   ].join(', ');
   const MEDIA_TAGS = new Set(['img', 'picture', 'svg', 'video', 'canvas',
     'audio', 'iframe', 'object', 'embed']);
 
   /**
-   * Per-operation caches: page styles can change at any time, so they only
-   * live for one click, key press or refresh.
-   * @type {!WeakMap<!Element, string>}
+   * Cached getComputedStyle.
+   * @param {!Element} element
+   * @return {!CSSStyleDeclaration}
    */
-  let exclusionCache = new WeakMap();
-  /** @type {!WeakMap<!Element, boolean>} */
-  let linkHeavyCache = new WeakMap();
-
-  /** Starts an operation with fresh caches. */
-  function beginOperation() {
-    exclusionCache = new WeakMap();
-    linkHeavyCache = new WeakMap();
+  function styleOf(element) {
+    let style = state.caches.style.get(element);
+    if (!style) {
+      style = getComputedStyle(element);
+      state.caches.style.set(element, style);
+    }
+    return style;
   }
 
   /**
@@ -880,15 +1096,16 @@
     if (element instanceof HTMLElement && element.isContentEditable) {
       return 'hard';
     }
-    const style = getComputedStyle(element);
+    const style = styleOf(element);
     if (style.display === 'none' || style.visibility === 'hidden' ||
         style.visibility === 'collapse') {
       return 'hard';
     }
-    if ((style.position === 'fixed' || style.position === 'sticky') &&
-        isWidgetSized(element)) {
-      return 'hard';
-    }
+    // Sticky headings and paragraphs (section titles that stick while their
+    // section scrolls by) are text, not widgets.
+    const pinned = style.position === 'fixed' ||
+        (style.position === 'sticky' && !BLOCK_TAGS.has(tag));
+    if (pinned && isWidgetSized(element)) return 'hard';
     if (isVisuallyHidden(element, style)) return 'hard';
     if (isExcludedName(nameOf(element))) return 'name';
     return '';
@@ -900,10 +1117,31 @@
    * @return {string}
    */
   function exclusionOf(element) {
-    let result = exclusionCache.get(element);
+    let result = state.caches.exclusion.get(element);
     if (result === undefined) {
       result = computeExclusion(element);
-      exclusionCache.set(element, result);
+      state.caches.exclusion.set(element, result);
+    }
+    return result;
+  }
+
+  /**
+   * @param {!Element} element
+   * @return {number} Share of the element's text inside links.
+   */
+  function linkDensityOf(element) {
+    let result = state.caches.linkDensity.get(element);
+    if (result === undefined) {
+      result = 0;
+      const length = normalizedText(element).length;
+      if (length) {
+        let links = 0;
+        for (const link of element.querySelectorAll('a')) {
+          links += normalizedText(link).length;
+        }
+        result = links / length;
+      }
+      state.caches.linkDensity.set(element, result);
     }
     return result;
   }
@@ -915,20 +1153,17 @@
    * @return {boolean}
    */
   function isLinkHeavy(block) {
-    let result = linkHeavyCache.get(block);
-    if (result === undefined) {
-      result = false;
-      if (!HEADING_TAGS.has(block.localName)) {
-        const length = normalizedText(block).length;
-        let links = 0;
-        for (const link of block.querySelectorAll('a')) {
-          links += normalizedText(link).length;
-        }
-        result = length > 0 && links / length > CONFIG.maxLinkDensity;
-      }
-      linkHeavyCache.set(block, result);
-    }
-    return result;
+    return !HEADING_TAGS.has(block.localName) &&
+        linkDensityOf(block) > CONFIG.maxLinkDensity;
+  }
+
+  /**
+   * @param {!Element} element
+   * @return {boolean} Whether the element is laid out as a block, so that
+   *     text directly inside it forms lines of its own.
+   */
+  function isBlockLike(element) {
+    return CONFIG.blockDisplays.includes(styleOf(element).display);
   }
 
   /**
@@ -949,7 +1184,9 @@
   /**
    * Returns the block (paragraph, list item, heading …) whose lines contain a
    * text node, or null if the text is not selectable: blank, outside the
-   * content root, in an excluded element or in a link-heavy block.
+   * content root, in an excluded element or in a link-heavy block. Text
+   * outside every block tag (a <div> with <br>, a table cell, <pre>) belongs
+   * to its nearest block-like ancestor.
    * @param {!Text} text
    * @param {!Element} root
    * @return {?Element}
@@ -958,12 +1195,20 @@
     if (!/\S/.test(text.data) || !root.contains(text)) return null;
     /** @type {?Element} */
     let block = null;
+    /** @type {?Element} */
+    let container = null;
     for (let element = text.parentElement; element && element !== root;
       element = element.parentElement) {
       if (exclusionOf(element)) return null;
-      if (!block && BLOCK_TAGS.has(element.localName)) block = element;
+      if (block) continue;
+      if (BLOCK_TAGS.has(element.localName)) {
+        block = element;
+      } else if (!container && isBlockLike(element)) {
+        container = element;
+      }
     }
     if (!block && BLOCK_TAGS.has(root.localName)) block = root;
+    if (!block) block = container || (isBlockLike(root) ? root : null);
     if (!block || isLinkHeavy(block)) return null;
     return block;
   }
@@ -972,18 +1217,15 @@
   // Content root (Readability-like heuristics)
   // ===========================================================================
 
-  /** @type {?{element: !Element, url: string}} */
-  let rootCache = null;
-
   /**
-   * Block elements below a container without nested blocks: the actual
-   * paragraphs, list items and headings.
+   * Paragraph-like elements below a container without nested ones: the
+   * actual paragraphs, list items, headings and text containers.
    * @param {!Element} container
    * @return {!Array<!Element>}
    */
   function leafBlocks(container) {
-    return [...container.querySelectorAll(BLOCK_SELECTOR)].filter(
-        (block) => !block.querySelector(BLOCK_SELECTOR));
+    return [...container.querySelectorAll(PARAGRAPH_SELECTOR)].filter(
+        (block) => !block.querySelector(PARAGRAPH_SELECTOR));
   }
 
   /**
@@ -1010,6 +1252,7 @@
   function findSemanticRoot() {
     const elements = [...document.querySelectorAll(SEMANTIC_SELECTOR)]
         .filter(isRootCandidate);
+    const indices = new Map(elements.map((element, index) => [element, index]));
     /** @type {!Array<!SemanticCandidate>} */
     const candidates = elements.map((element) => {
       let textLength = 0;
@@ -1019,33 +1262,19 @@
         }
       }
       let ancestor = element.parentElement?.closest(SEMANTIC_SELECTOR);
-      while (ancestor && !elements.includes(ancestor)) {
+      while (ancestor && !indices.has(ancestor)) {
         ancestor = ancestor.parentElement?.closest(SEMANTIC_SELECTOR);
       }
-      return {textLength, parent: ancestor ? elements.indexOf(ancestor) : -1};
+      return {textLength, parent: ancestor ? indices.get(ancestor) ?? -1 : -1};
     });
     const index = chooseSemanticRoot(candidates);
     return index >= 0 ? elements[index] : null;
   }
 
   /**
-   * @param {!Element} element
-   * @return {number} Share of the text inside links.
-   */
-  function linkDensityOf(element) {
-    const length = normalizedText(element).length;
-    if (!length) return 0;
-    let links = 0;
-    for (const link of element.querySelectorAll('a')) {
-      links += normalizedText(link).length;
-    }
-    return links / length;
-  }
-
-  /**
    * Finds the content root by scoring the ancestors of all paragraphs, like
    * Readability.
-   * @return {?Element}
+   * @return {?Element} null if no container holds enough text.
    */
   function findScoredRoot() {
     const body = /** @type {!HTMLElement} */ (document.body);
@@ -1077,6 +1306,7 @@
       }
     }
     const elements = [...features.keys()];
+    const indices = new Map(elements.map((element, index) => [element, index]));
     const candidates = elements.map((element) => {
       const entry = /** @type {!ContainerFeatures} */ (features.get(element));
       entry.linkDensity = linkDensityOf(element);
@@ -1084,26 +1314,55 @@
       while (parent && !features.has(parent)) parent = parent.parentElement;
       return {
         score: scoreContainer(entry),
-        parent: parent ? elements.indexOf(parent) : -1,
+        parent: parent ? indices.get(parent) ?? -1 : -1,
       };
     });
     const index = pickBestCandidate(candidates);
-    return index >= 0 ? elements[index] : null;
+    if (index < 0) return null;
+    const element = elements[index];
+    const entry = /** @type {!ContainerFeatures} */ (features.get(element));
+    return hasEnoughText(entry.paragraphs) ? element : null;
   }
 
   /**
-   * Returns the main content element, detected once per URL.
-   * @param {boolean} force Detect again.
-   * @return {!Element}
+   * Marks the content root as outdated on the next change of the DOM. The
+   * observer disconnects itself after the first change, so a page that is
+   * not being read costs nothing.
    */
-  function contentRoot(force) {
-    if (!force && rootCache && rootCache.element.isConnected &&
-        rootCache.url === location.href) {
-      return rootCache.element;
+  function watchRoot() {
+    state.rootDirty = false;
+    let watcher = state.rootWatcher;
+    if (!watcher) {
+      const observer = new MutationObserver(() => {
+        state.rootDirty = true;
+        observer.disconnect();
+      });
+      state.rootWatcher = observer;
+      watcher = observer;
     }
-    const element = findSemanticRoot() || findScoredRoot() ||
-        /** @type {!HTMLElement} */ (document.body);
-    rootCache = {element, url: location.href};
+    watcher.observe(/** @type {!HTMLElement} */ (document.body),
+        {childList: true, subtree: true});
+  }
+
+  /**
+   * Returns the main content element, detected once per page. It is
+   * detected again after it was removed, and on request if the DOM changed
+   * since (at most once per CONFIG.redetectInterval).
+   * @param {boolean} redetect Detect again if the DOM changed.
+   * @return {?Element} null if the page has no article-like content.
+   */
+  function contentRoot(redetect) {
+    const key = withoutHash(location.href);
+    const cached = state.root;
+    if (cached && cached.key === key &&
+        (!cached.element || cached.element.isConnected) &&
+        !(redetect && state.rootDirty &&
+          Date.now() - cached.time >= CONFIG.redetectInterval)) {
+      return cached.element;
+    }
+    const element = findSemanticRoot() || findScoredRoot();
+    state.root = {element, key, time: Date.now()};
+    watchRoot();
     return element;
   }
 
@@ -1177,6 +1436,26 @@
   }
 
   /**
+   * Content boxes of a block (without padding and border), one per fragment
+   * (e.g. CSS columns).
+   * @param {!Element} block
+   * @return {!Array<!Box>}
+   */
+  function contentBoxes(block) {
+    const style = styleOf(block);
+    const left = (parseFloat(style.paddingLeft) || 0) +
+        (parseFloat(style.borderLeftWidth) || 0);
+    const right = (parseFloat(style.paddingRight) || 0) +
+        (parseFloat(style.borderRightWidth) || 0);
+    return [...block.getClientRects()].map((rect) => ({
+      top: rect.top,
+      bottom: rect.bottom,
+      left: rect.left + left,
+      right: rect.right - right,
+    }));
+  }
+
+  /**
    * Measures the lines of a segment from the client rects of its text nodes
    * (one rect per line fragment).
    * @param {!Segment} segment
@@ -1184,7 +1463,7 @@
    */
   function measureSegment(segment) {
     const range = document.createRange();
-    /** @type {!Array<!Line>} */
+    /** @type {!Array<!Fragment>} */
     const rects = [];
     /** @type {!Array<{textIndex: number, rectIndex: number}>} */
     const fragments = [];
@@ -1197,7 +1476,20 @@
         fragments.push({textIndex, rectIndex});
       }
     });
-    return {lines: groupRectsIntoLines(rects), fragments};
+    const columns = contentBoxes(segment.block);
+    return {lines: groupRectsIntoLines(rects, columns), fragments, columns};
+  }
+
+  /**
+   * @param {!SegmentLayout} layout
+   * @param {!Box} box
+   * @return {number} Column of the layout that contains the box; -1 if the
+   *     block is not split into columns.
+   */
+  function columnAt(layout, box) {
+    return layout.columns.length > 1 ?
+        pickColumnIndex(layout.columns, box) :
+        -1;
   }
 
   /**
@@ -1235,8 +1527,7 @@
 
   /**
    * Text anchor at the start of a line: the first character of its first
-   * fragment. Within a text node that spans several lines, the line start
-   * is found by binary search over the character positions.
+   * fragment.
    * @param {!LineRef} ref
    * @return {!Anchor}
    */
@@ -1247,10 +1538,8 @@
     let offset = 0;
     if (fragment.rectIndex > 0) {
       const range = document.createRange();
-      offset = findFirst(0, text.data.length, (index) => {
-        const rect = rectOfChar(range, text, index);
-        return rect !== null && (rect.top + rect.bottom) / 2 >= line.top;
-      });
+      offset = lineStartOffset(text.data.length,
+          (index) => rectOfChar(range, text, index), line, ref.layout.columns);
     }
     return {node: text, offset: firstNonSpace(text.data, offset)};
   }
@@ -1261,34 +1550,17 @@
    * @return {?LineRef} null if the text is gone or no longer selectable.
    */
   function resolveAnchor(anchor) {
-    if (!anchor.node.isConnected) return null;
-    const segment = segmentAround(anchor.node, contentRoot(false));
+    const root = contentRoot(false);
+    if (!anchor.node.isConnected || !root) return null;
+    const segment = segmentAround(anchor.node, root);
     if (!segment) return null;
     const layout = measureSegment(segment);
     const rect = rectNear(anchor.node, anchor.offset);
     if (!layout.lines.length || !rect) return null;
-    const index = nearestLineIndex(layout.lines, (rect.top + rect.bottom) / 2);
+    const y = (rect.top + rect.bottom) / 2;
+    let index = nearestLineIndex(layout.lines, y, columnAt(layout, rect));
+    if (index < 0) index = nearestLineIndex(layout.lines, y);
     return {segment, layout, index};
-  }
-
-  /**
-   * Content boxes of a block (without padding and border), one per fragment
-   * (e.g. CSS columns).
-   * @param {!Element} block
-   * @return {!Array<!Box>}
-   */
-  function contentBoxes(block) {
-    const style = getComputedStyle(block);
-    const left = parseFloat(style.paddingLeft) +
-        parseFloat(style.borderLeftWidth) || 0;
-    const right = parseFloat(style.paddingRight) +
-        parseFloat(style.borderRightWidth) || 0;
-    return [...block.getClientRects()].map((rect) => ({
-      top: rect.top,
-      bottom: rect.bottom,
-      left: rect.left + left,
-      right: rect.right - right,
-    }));
   }
 
   /**
@@ -1297,7 +1569,8 @@
    */
   function columnOf(ref) {
     const line = ref.layout.lines[ref.index];
-    return pickColumn(contentBoxes(ref.segment.block), line) || line;
+    const box = ref.layout.columns[line.column];
+    return box && box.right > box.left ? box : line;
   }
 
   // ===========================================================================
@@ -1391,16 +1664,6 @@
   `;
 
   /**
-   * @typedef {{host: !HTMLElement, ruler: !HTMLElement,
-   *     controls: !HTMLElement}} Ui
-   */
-
-  /** @type {?Ui} */
-  let ui = null;
-  /** @type {?Placement} Current position of the highlight. */
-  let placement = null;
-
-  /**
    * Adds the styles to the shadow root. Constructed style sheets are not
    * blocked by a Content Security Policy without 'unsafe-inline'.
    * @param {!ShadowRoot} shadow
@@ -1453,9 +1716,11 @@
    * @return {!Ui}
    */
   function ensureUi() {
-    if (ui) {
-      if (!ui.host.isConnected) document.documentElement.append(ui.host);
-      return ui;
+    if (state.ui) {
+      if (!state.ui.host.isConnected) {
+        document.documentElement.append(state.ui.host);
+      }
+      return state.ui;
     }
     const host = /** @type {!HTMLElement} */ (
       document.createElement('reading-ruler'));
@@ -1479,8 +1744,8 @@
         createControl('Next line', 'M6 9l6 6 6-6', () => move(1)));
     shadow.append(ruler, controls);
     document.documentElement.append(host);
-    ui = {host, ruler, controls};
-    return ui;
+    state.ui = {host, ruler, controls};
+    return state.ui;
   }
 
   /**
@@ -1493,6 +1758,29 @@
         Math.round(a.left) === Math.round(b.left) &&
         Math.round(a.width) === Math.round(b.width) &&
         Math.round(a.height) === Math.round(b.height);
+  }
+
+  /**
+   * Position of the selected block and of the anchor character relative to
+   * the highlight's host. While it stays the same, the highlight is still in
+   * place, and a refresh can skip measuring the lines.
+   * @param {!Element} block
+   * @return {string} Empty if the anchor or block is gone.
+   */
+  function layoutSignature(block) {
+    const anchor = state.anchor;
+    const ui = state.ui;
+    if (!anchor || !ui || !anchor.node.isConnected || !block.isConnected) {
+      return '';
+    }
+    const rect = rectNear(anchor.node, anchor.offset);
+    if (!rect) return '';
+    const origin = ui.host.getBoundingClientRect();
+    const box = block.getBoundingClientRect();
+    return [
+      rect.top - origin.top, rect.left - origin.left, rect.width, rect.height,
+      box.top - origin.top, box.left - origin.left, box.width, box.height,
+    ].map((value) => Math.round(value)).join(' ');
   }
 
   /**
@@ -1513,7 +1801,7 @@
     };
     if (animate && !ruler.hidden) {
       ruler.classList.add('rr-animate');
-    } else if (!samePlacement(placement, next)) {
+    } else if (!samePlacement(state.placement, next)) {
       // A reflow jumps; keep a running slide if nothing changed.
       ruler.classList.remove('rr-animate');
     }
@@ -1523,16 +1811,20 @@
     ruler.style.height = `${next.height}px`;
     ruler.hidden = false;
     controls.hidden = !matchMedia(CONFIG.touchQuery).matches;
-    placement = next;
+    state.placement = next;
+    const block = ref.segment.block;
+    state.signature = {block, value: layoutSignature(block)};
   }
 
   /** Hides the highlight and the controls. */
   function hideUi() {
+    state.placement = null;
+    state.signature = null;
+    const ui = state.ui;
     if (!ui) return;
     ui.ruler.hidden = true;
     ui.ruler.classList.remove('rr-animate');
     ui.controls.hidden = true;
-    placement = null;
   }
 
   // ===========================================================================
@@ -1540,26 +1832,29 @@
   // ===========================================================================
 
   /**
-   * Nearest scrollable ancestor, or null for the page itself.
+   * Scrollable ancestors of an element, innermost first, without the page.
    * @param {!Element} element
-   * @return {?Element}
+   * @return {!Array<!Element>}
    */
-  function scrollContainerOf(element) {
+  function scrollContainersOf(element) {
+    const containers = [];
     for (let node = element.parentElement;
       node && node !== document.documentElement &&
           node !== document.scrollingElement;
       node = node.parentElement) {
-      const overflow = getComputedStyle(node).overflowY;
+      const overflow = styleOf(node).overflowY;
       if ((overflow === 'auto' || overflow === 'scroll') &&
           node.scrollHeight > node.clientHeight + 1) {
-        return node;
+        containers.push(node);
       }
     }
-    return null;
+    return containers;
   }
 
   /**
-   * Visible part of a scroll container in viewport coordinates.
+   * Visible part of a scroll container in viewport coordinates. A container
+   * outside the viewport yields its whole box: an outer container brings it
+   * into view.
    * @param {?Element} scroller null for the page.
    * @return {!Band}
    */
@@ -1574,10 +1869,12 @@
     }
     const rect = scroller.getBoundingClientRect();
     const top = rect.top + scroller.clientTop;
-    return {
-      top: Math.max(top, 0),
-      bottom: Math.min(top + scroller.clientHeight, window.innerHeight),
-    };
+    const bottom = top + scroller.clientHeight;
+    const visibleTop = Math.max(top, 0);
+    const visibleBottom = Math.min(bottom, window.innerHeight);
+    return visibleBottom > visibleTop ?
+        {top: visibleTop, bottom: visibleBottom} :
+        {top, bottom};
   }
 
   /**
@@ -1625,8 +1922,8 @@
         for (const element of document.elementsFromPoint(x, y)) {
           if (seen.has(element)) continue;
           seen.add(element);
-          if (ui && element === ui.host) continue;
-          const style = getComputedStyle(element);
+          if (state.ui && element === state.ui.host) continue;
+          const style = styleOf(element);
           if (style.position !== 'fixed' && style.position !== 'sticky') {
             continue;
           }
@@ -1641,33 +1938,51 @@
   }
 
   /**
+   * Part of a scroll container's view not covered by fixed or sticky
+   * headers and footers.
+   * @param {?Element} scroller null for the page.
+   * @param {!Span} column
+   * @return {!Band}
+   */
+  function visibleBand(scroller, column) {
+    const view = viewOf(scroller);
+    return uncoveredBand(findObstructions(view, column), view, column);
+  }
+
+  /**
    * Scrolls so that a line is centered in the part of the view that is not
-   * covered by fixed or sticky headers and footers.
+   * covered by fixed or sticky headers and footers. Nested scroll containers
+   * are scrolled from the innermost to the page, so that each one brings
+   * the inner ones into view. Smooth scrolling has not moved anything when
+   * the next container is computed, so the line's position is tracked.
    * @param {!LineRef} ref
    */
   function centerLine(ref) {
     const line = ref.layout.lines[ref.index];
-    const scroller = scrollContainerOf(ref.segment.block);
-    const view = viewOf(scroller);
     const column = columnOf(ref);
-    const band = uncoveredBand(findObstructions(view, column), view, column);
     const page = document.scrollingElement || document.documentElement;
-    const target = scroller || page;
-    const top = computeScrollTarget({
-      lineTop: line.top,
-      lineBottom: line.bottom,
-      bandTop: band.top,
-      bandBottom: band.bottom,
-      scrollTop: target.scrollTop,
-      maxScrollTop: target.scrollHeight - target.clientHeight,
-    });
-    if (Math.abs(top - target.scrollTop) < 1) return;
     const behavior =
         matchMedia(CONFIG.reducedMotionQuery).matches ? 'instant' : 'smooth';
-    if (scroller) {
-      scroller.scrollTo({top, behavior});
-    } else {
-      window.scrollTo({top, left: window.scrollX, behavior});
+    let shift = 0;
+    for (const scroller of [...scrollContainersOf(ref.segment.block), null]) {
+      const band = visibleBand(scroller, column);
+      const target = scroller || page;
+      const top = computeScrollTarget({
+        lineTop: line.top - shift,
+        lineBottom: line.bottom - shift,
+        bandTop: band.top,
+        bandBottom: band.bottom,
+        scrollTop: target.scrollTop,
+        maxScrollTop: target.scrollHeight - target.clientHeight,
+      });
+      const delta = top - target.scrollTop;
+      if (Math.abs(delta) < 1) continue;
+      if (scroller) {
+        scroller.scrollTo({top, behavior});
+      } else {
+        window.scrollTo({top, left: window.scrollX, behavior});
+      }
+      shift += delta;
     }
   }
 
@@ -1675,53 +1990,51 @@
   // Selection
   // ===========================================================================
 
-  /** @type {?Anchor} The selected line, as the text position of its start. */
-  let anchor = null;
-
   /**
    * Selects a line and keeps it highlighted.
    * @param {!LineRef} ref
    * @param {boolean} animate
    */
   function selectLine(ref, animate) {
-    anchor = anchorOf(ref);
+    state.anchor = anchorOf(ref);
     render(ref, animate);
     startTracking(ref.segment.block);
   }
 
   /** Removes the selection. */
   function clearSelection() {
-    anchor = null;
+    state.anchor = null;
     hideUi();
     stopTracking();
   }
 
   /**
-   * Finds the selectable line at a click position.
    * @param {number} x
    * @param {number} y
-   * @param {!Element} target Element under the pointer.
-   * @return {?LineRef}
+   * @return {?Text} Text node at a point.
    */
-  function lineAtPoint(x, y, target) {
-    if (MEDIA_TAGS.has(target.localName)) return null;
+  function textAtPoint(x, y) {
     const position = document.caretPositionFromPoint(x, y);
     const node = position && position.offsetNode;
-    if (!node || node.nodeType !== Node.TEXT_NODE) return null;
-    const text = /** @type {!Text} */ (node);
-    const parent = text.parentElement;
-    if (!parent || !(target.contains(text) || parent.contains(target))) {
-      return null;
-    }
-    let root = contentRoot(false);
-    if (!blockOf(text, root)) {
-      // The content may have changed since the root was detected.
-      root = contentRoot(true);
-    }
+    return node && node.nodeType === Node.TEXT_NODE ?
+        /** @type {!Text} */ (node) :
+        null;
+  }
+
+  /**
+   * Finds the selectable line of a text node at a point.
+   * @param {!Text} text
+   * @param {!Element} root
+   * @param {number} x
+   * @param {number} y
+   * @return {?LineRef} null if the point is beside the text column.
+   */
+  function lineOfText(text, root, x, y) {
     const segment = segmentAround(text, root);
     if (!segment) return null;
     const layout = measureSegment(segment);
-    const index = lineIndexAt(layout.lines, y);
+    const point = {top: y, bottom: y, left: x, right: x};
+    const index = lineIndexAt(layout.lines, y, columnAt(layout, point));
     if (index < 0) return null;
     const ref = {segment, layout, index};
     const column = columnOf(ref);
@@ -1733,16 +2046,72 @@
   }
 
   /**
+   * Finds the selectable line at a click position.
+   * @param {number} x
+   * @param {number} y
+   * @param {!Element} target Element under the pointer.
+   * @return {?LineRef}
+   */
+  function lineAtPoint(x, y, target) {
+    if (MEDIA_TAGS.has(target.localName)) return null;
+    const text = textAtPoint(x, y);
+    const parent = text && text.parentElement;
+    if (!text || !parent ||
+        !(target.contains(text) || parent.contains(target))) {
+      return null;
+    }
+    let root = contentRoot(false);
+    if (!root || !root.contains(text)) {
+      // The content may have changed since the root was detected.
+      root = contentRoot(true);
+    }
+    return root ? lineOfText(text, root, x, y) : null;
+  }
+
+  /**
+   * If the selected line was scrolled out of view, finds the line to
+   * continue with instead: the first line fully in view when moving down,
+   * the last one when moving up.
+   * @param {!LineRef} current
+   * @param {!Element} root
+   * @param {number} direction 1 (down) or -1 (up).
+   * @return {?LineRef} null if the selected line is in view or no line is.
+   */
+  function lineInViewInstead(current, root, direction) {
+    const column = columnOf(current);
+    const scroller = scrollContainersOf(current.segment.block)[0] || null;
+    const band = visibleBand(scroller, column);
+    if (!isOutsideBand(current.layout.lines[current.index], band)) return null;
+    const x = clamp((column.left + column.right) / 2, 1,
+        document.documentElement.clientWidth - 2);
+    for (const y of probeHeights(band, CONFIG.visibleLineProbe, direction)) {
+      const text = textAtPoint(x, y);
+      const ref = text && lineOfText(text, root, x, y);
+      if (ref && isInsideBand(ref.layout.lines[ref.index], band)) return ref;
+    }
+    return null;
+  }
+
+  /**
    * Moves the selection to the next or previous line in reading order,
-   * across paragraphs, lists and headings, and centers it.
+   * across paragraphs, lists and headings, and centers it. If the selected
+   * line was scrolled out of view, a visible line is selected instead.
    * @param {number} direction 1 (down) or -1 (up).
    */
   function move(direction) {
+    const anchor = state.anchor;
     if (!anchor) return;
     beginOperation();
     const current = resolveAnchor(anchor);
-    if (!current) {
+    const root = contentRoot(false);
+    if (!current || !root) {
       clearSelection();
+      return;
+    }
+    const visible = lineInViewInstead(current, root, direction);
+    if (visible) {
+      // The reader scrolled on: continue there without moving the page.
+      selectLine(visible, false);
       return;
     }
     /** @type {?LineRef} */
@@ -1751,7 +2120,6 @@
     if (index >= 0 && index < current.layout.lines.length) {
       target = {...current, index};
     } else {
-      const root = contentRoot(false);
       const line = current.layout.lines[current.index];
       let segment = current.segment;
       for (let scanned = 0; scanned < CONFIG.maxSegmentScan; scanned++) {
@@ -1776,14 +2144,22 @@
     }
   }
 
-  /** Updates the highlight after a reflow (resize, zoom, fonts, content). */
+  /**
+   * Updates the highlight after a reflow (resize, zoom, fonts, content).
+   * Skips measuring while the selected block and anchor have not moved.
+   */
   function refresh() {
+    const anchor = state.anchor;
     if (!anchor) return;
+    const saved = state.signature;
+    if (saved && saved.value && saved.value === layoutSignature(saved.block)) {
+      return;
+    }
     beginOperation();
     const ref = resolveAnchor(anchor);
     if (ref) {
       render(ref, false);
-      observeBlock(ref.segment.block);
+      observeSelection(ref.segment.block);
     } else {
       clearSelection();
     }
@@ -1793,20 +2169,12 @@
   // Tracking reflows while a line is selected
   // ===========================================================================
 
-  let refreshPending = false;
-  /** @type {?ResizeObserver} */
-  let resizeObserver = null;
-  /** @type {?MutationObserver} */
-  let mutationObserver = null;
-  /** @type {?Element} */
-  let observedBlock = null;
-
   /** Refreshes the highlight in the next animation frame. */
   function scheduleRefresh() {
-    if (refreshPending) return;
-    refreshPending = true;
+    if (state.refreshPending) return;
+    state.refreshPending = true;
     requestAnimationFrame(() => {
-      refreshPending = false;
+      state.refreshPending = false;
       refresh();
     });
   }
@@ -1820,14 +2188,30 @@
   }
 
   /**
-   * Observes the size of the selected block.
+   * Observes the content root for mutations and the selected block for
+   * resizes. Mutations elsewhere (ads, tickers) do not cause refreshes;
+   * if they move the content, the page's size changes.
    * @param {!Element} block
    */
-  function observeBlock(block) {
-    if (!resizeObserver || block === observedBlock) return;
-    if (observedBlock) resizeObserver.unobserve(observedBlock);
+  function observeSelection(block) {
+    const {resizeObserver, mutationObserver} = state;
+    if (!resizeObserver || !mutationObserver) return;
+    const root = contentRoot(false) || document.body;
+    if (root && root !== state.observedRoot) {
+      mutationObserver.disconnect();
+      mutationObserver.observe(root,
+          {childList: true, subtree: true, characterData: true});
+      state.observedRoot = root;
+    }
+    if (block === state.observedBlock) return;
+    const observed = state.observedBlock;
+    // The root element and body are observed all the time.
+    if (observed && observed !== document.documentElement &&
+        observed !== document.body) {
+      resizeObserver.unobserve(observed);
+    }
     resizeObserver.observe(block);
-    observedBlock = block;
+    state.observedBlock = block;
   }
 
   /**
@@ -1835,16 +2219,12 @@
    * @param {!Element} block
    */
   function startTracking(block) {
-    if (!resizeObserver) {
-      resizeObserver = new ResizeObserver(scheduleRefresh);
-      resizeObserver.observe(document.documentElement);
-      resizeObserver.observe(/** @type {!HTMLElement} */ (document.body));
-      mutationObserver = new MutationObserver(scheduleRefresh);
-      mutationObserver.observe(/** @type {!HTMLElement} */ (document.body), {
-        childList: true,
-        subtree: true,
-        characterData: true,
-      });
+    if (!state.resizeObserver) {
+      state.resizeObserver = new ResizeObserver(scheduleRefresh);
+      state.resizeObserver.observe(document.documentElement);
+      state.resizeObserver.observe(
+          /** @type {!HTMLElement} */ (document.body));
+      state.mutationObserver = new MutationObserver(scheduleRefresh);
       window.addEventListener('resize', scheduleRefresh);
       document.addEventListener('scroll', onScroll, {capture: true,
         passive: true});
@@ -1853,17 +2233,18 @@
       document.addEventListener('toggle', scheduleRefresh, true);
       document.fonts?.addEventListener('loadingdone', scheduleRefresh);
     }
-    observeBlock(block);
+    observeSelection(block);
   }
 
   /** Stops listening for reflows. */
   function stopTracking() {
-    if (!resizeObserver) return;
-    resizeObserver.disconnect();
-    mutationObserver?.disconnect();
-    resizeObserver = null;
-    mutationObserver = null;
-    observedBlock = null;
+    if (!state.resizeObserver) return;
+    state.resizeObserver.disconnect();
+    state.mutationObserver?.disconnect();
+    state.resizeObserver = null;
+    state.mutationObserver = null;
+    state.observedBlock = null;
+    state.observedRoot = null;
     window.removeEventListener('resize', scheduleRefresh);
     document.removeEventListener('scroll', onScroll, true);
     document.removeEventListener('load', scheduleRefresh, true);
@@ -1875,12 +2256,10 @@
   // Input
   // ===========================================================================
 
-  /** @type {?{x: number, y: number, type: string}} */
-  let pointerDown = null;
-
   /** @param {!PointerEvent} event */
   function onPointerDown(event) {
-    pointerDown = {x: event.clientX, y: event.clientY, type: event.pointerType};
+    state.pointerDown =
+        {x: event.clientX, y: event.clientY, type: event.pointerType};
   }
 
   /**
@@ -1889,12 +2268,12 @@
    *     i.e. the user dragged to select text.
    */
   function wasDragged(event) {
-    if (!pointerDown) return false;
-    const limit = pointerDown.type === 'mouse' ?
+    const down = state.pointerDown;
+    if (!down) return false;
+    const limit = down.type === 'mouse' ?
         CONFIG.dragDistance.mouse :
         CONFIG.dragDistance.touch;
-    return Math.hypot(event.clientX - pointerDown.x,
-        event.clientY - pointerDown.y) > limit;
+    return Math.hypot(event.clientX - down.x, event.clientY - down.y) > limit;
   }
 
   /** @return {boolean} Whether text is selected on the page. */
@@ -1906,15 +2285,16 @@
 
   /**
    * Selects the line under a click or tap, or clears the selection when the
-   * click hits no body text.
+   * click hits no body text. Clicks dispatched by the page's scripts are
+   * ignored.
    * @param {!MouseEvent} event
    */
   function onClick(event) {
-    if (event.button !== 0 || event.detail > 1 || event.ctrlKey ||
-        event.shiftKey || event.altKey || event.metaKey) {
+    if (!event.isTrusted || event.button !== 0 || event.detail > 1 ||
+        event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
       return;
     }
-    if (ui && event.composedPath().includes(ui.host)) return;
+    if (state.ui && event.composedPath().includes(state.ui.host)) return;
     const target = event.target;
     if (!(target instanceof Element) || target.closest(INTERACTIVE_SELECTOR)) {
       return;
@@ -1924,7 +2304,7 @@
     const ref = lineAtPoint(event.clientX, event.clientY, target);
     if (ref) {
       selectLine(ref, false);
-    } else if (anchor) {
+    } else if (state.anchor) {
       clearSelection();
     }
   }
@@ -1956,8 +2336,8 @@
    * @param {!KeyboardEvent} event
    */
   function onKeyDown(event) {
-    if (!anchor || event.isComposing || event.ctrlKey || event.altKey ||
-        event.metaKey || event.shiftKey) {
+    if (!state.anchor || event.isComposing || event.ctrlKey ||
+        event.altKey || event.metaKey || event.shiftKey) {
       return;
     }
     const key = event.key;
@@ -1976,15 +2356,14 @@
   // ===========================================================================
 
   const SITE = location.hostname || location.protocol;
-  let enabled = false;
 
   /**
    * Attaches or detaches the input listeners.
    * @param {boolean} value
    */
   function setEnabled(value) {
-    if (value === enabled) return;
-    enabled = value;
+    if (value === state.enabled) return;
+    state.enabled = value;
     if (value) {
       window.addEventListener('pointerdown', onPointerDown, true);
       window.addEventListener('click', onClick, true);
@@ -1999,7 +2378,7 @@
 
   /** Shows the menu command for the current state. */
   function registerMenu() {
-    const caption = enabled ?
+    const caption = state.enabled ?
         `Reading Ruler: Disable on ${SITE}` :
         `Reading Ruler: Enable on ${SITE}`;
     // The same id replaces the command, so the caption follows the state.

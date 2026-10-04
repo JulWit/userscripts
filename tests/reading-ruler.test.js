@@ -46,6 +46,19 @@ function rect(top, bottom, left, right, source = 0) {
 }
 
 /**
+ * @param {number} top
+ * @param {number} bottom
+ * @param {number} left
+ * @param {number} right
+ * @param {number=} source
+ * @param {number=} column
+ * @return {!Object} Line as returned by groupRectsIntoLines.
+ */
+function line(top, bottom, left, right, source = 0, column = 0) {
+  return {top, bottom, left, right, source, column};
+}
+
+/**
  * Lines of 20 px text with 30 px line height, 600 px wide.
  * @param {number} count
  * @return {!Array<!Object>}
@@ -65,7 +78,7 @@ describe('groupRectsIntoLines', () => {
       rect(100, 120, 150, 190, 2),
       rect(101, 121, 190, 300, 3),
     ]);
-    assert.deepEqual(lines, [rect(100, 121, 0, 300, 0)]);
+    assert.deepEqual(lines, [line(100, 121, 0, 300, 0)]);
   });
 
   it('separates consecutive lines', () => {
@@ -94,7 +107,7 @@ describe('groupRectsIntoLines', () => {
       rect(96, 110, 200, 210, 1),
       rect(104, 118, 210, 400, 2),
     ]);
-    assert.deepEqual(lines, [rect(96, 120, 0, 400, 0)]);
+    assert.deepEqual(lines, [line(96, 120, 0, 400, 0)]);
   });
 
   it('does not merge lines that overlap slightly (tight line height)', () => {
@@ -111,7 +124,7 @@ describe('groupRectsIntoLines', () => {
       rect(100, 100, 0, 50, 1),
       rect(130, 150, 0, 600, 2),
     ]);
-    assert.deepEqual(lines, [rect(130, 150, 0, 600, 2)]);
+    assert.deepEqual(lines, [line(130, 150, 0, 600, 2)]);
   });
 
   it('ignores tall outliers such as drop caps', () => {
@@ -122,7 +135,7 @@ describe('groupRectsIntoLines', () => {
       rect(160, 180, 60, 600, 3),
     ]);
     assert.equal(lines.length, 3);
-    assert.deepEqual(lines[0], rect(100, 120, 60, 600, 1));
+    assert.deepEqual(lines[0], line(100, 120, 60, 600, 1));
   });
 
   it('returns lines sorted from top to bottom', () => {
@@ -130,11 +143,45 @@ describe('groupRectsIntoLines', () => {
       rect(160, 180, 0, 100, 0),
       rect(100, 120, 0, 100, 1),
     ]);
-    assert.deepEqual(lines.map((line) => line.top), [100, 160]);
+    assert.deepEqual(lines.map((entry) => entry.top), [100, 160]);
   });
 
   it('returns no lines without rects', () => {
     assert.deepEqual(core.groupRectsIntoLines([]), []);
+  });
+
+  // A paragraph split across two CSS columns: its last lines in the left
+  // column are at the same height as its first lines in the right one.
+  const columns = [rect(0, 400, 0, 300), rect(0, 400, 340, 640)];
+
+  it('keeps lines of different CSS columns apart', () => {
+    const lines = core.groupRectsIntoLines([
+      rect(340, 360, 0, 300, 0),
+      rect(370, 390, 0, 300, 1),
+      rect(10, 30, 340, 640, 2),
+      rect(340, 360, 340, 640, 3),
+    ], columns);
+    assert.deepEqual(lines, [
+      line(340, 360, 0, 300, 0, 0),
+      line(370, 390, 0, 300, 1, 0),
+      line(10, 30, 340, 640, 2, 1),
+      line(340, 360, 340, 640, 3, 1),
+    ]);
+  });
+
+  it('sorts the lines by column, then from top to bottom', () => {
+    const lines = core.groupRectsIntoLines([
+      rect(10, 30, 340, 640, 0),
+      rect(370, 390, 0, 300, 1),
+      rect(340, 360, 0, 300, 2),
+    ], columns);
+    assert.deepEqual(lines.map((entry) => entry.source), [2, 1, 0]);
+  });
+
+  it('ignores a single column box', () => {
+    const lines = core.groupRectsIntoLines([rect(100, 120, 0, 300, 0)],
+        [rect(0, 400, 0, 600)]);
+    assert.deepEqual(lines, [line(100, 120, 0, 300, 0, 0)]);
   });
 });
 
@@ -172,6 +219,16 @@ describe('nearestLineIndex', () => {
   it('returns -1 without lines', () => {
     assert.equal(core.nearestLineIndex([], 100), -1);
   });
+
+  it('only considers lines of the given column', () => {
+    const lines = [
+      line(100, 120, 0, 300, 0, 0),
+      line(300, 320, 340, 640, 1, 1),
+    ];
+    assert.equal(core.nearestLineIndex(lines, 110, 1), 1);
+    assert.equal(core.nearestLineIndex(lines, 110), 0);
+    assert.equal(core.nearestLineIndex(lines, 110, 2), -1);
+  });
 });
 
 describe('lineIndexAt', () => {
@@ -195,6 +252,19 @@ describe('lineIndexAt', () => {
   it('rejects clicks clearly outside the lines', () => {
     assert.equal(core.lineIndexAt(lines, 80), -1);
     assert.equal(core.lineIndexAt(lines, 200), -1);
+  });
+
+  it('finds the line in the clicked column', () => {
+    const columnLines = [
+      line(100, 120, 0, 300, 0, 0),
+      line(130, 150, 0, 300, 1, 0),
+      line(100, 120, 340, 640, 2, 1),
+    ];
+    assert.equal(core.lineIndexAt(columnLines, 110, 0), 0);
+    assert.equal(core.lineIndexAt(columnLines, 110, 1), 2);
+    // Below the last line of column 1 there is no neighbor to share a gap
+    // with: line 1 of column 0 does not count.
+    assert.equal(core.lineIndexAt(columnLines, 135, 1), -1);
   });
 });
 
@@ -221,21 +291,24 @@ describe('pickEntryLine', () => {
   });
 });
 
-describe('pickColumn and overlayBox', () => {
+describe('pickColumnIndex and overlayBox', () => {
   it('picks the box at the height of the line', () => {
     const columns = [rect(100, 400, 0, 300), rect(100, 400, 340, 640)];
-    const line = rect(130, 150, 340, 600);
-    assert.equal(core.pickColumn(columns, line), columns[1]);
+    assert.equal(core.pickColumnIndex(columns, rect(130, 150, 340, 600)), 1);
   });
 
   it('prefers a box at the line height over a closer one beside it', () => {
     const columns = [rect(0, 90, 0, 600), rect(100, 400, 700, 900)];
-    assert.equal(core.pickColumn(columns, rect(130, 150, 0, 600)),
-        columns[1]);
+    assert.equal(core.pickColumnIndex(columns, rect(130, 150, 0, 600)), 1);
   });
 
-  it('returns null without boxes', () => {
-    assert.equal(core.pickColumn([], rect(0, 20, 0, 100)), null);
+  it('skips empty boxes', () => {
+    const columns = [rect(100, 400, 0, 0), rect(100, 400, 340, 640)];
+    assert.equal(core.pickColumnIndex(columns, rect(130, 150, 0, 100)), 1);
+  });
+
+  it('returns -1 without boxes', () => {
+    assert.equal(core.pickColumnIndex([], rect(0, 20, 0, 100)), -1);
   });
 
   it('spans the column and pads the line', () => {
@@ -279,6 +352,81 @@ describe('findFirst and firstNonSpace', () => {
   it('stays inside the text', () => {
     assert.equal(core.firstNonSpace('word  ', 4), 4);
     assert.equal(core.firstNonSpace('word', 9), 3);
+  });
+});
+
+describe('lineStartOffset', () => {
+  /**
+   * Fake character rects: 10 characters per line, 30 px line height.
+   * @param {!Set<number>} hidden Offsets of collapsed white space.
+   * @return {function(number): ?Object}
+   */
+  function charRects(hidden) {
+    return (index) => {
+      if (hidden.has(index)) return null;
+      const row = Math.floor(index / 10);
+      const left = (index % 10) * 10;
+      return rect(100 + row * 30, 120 + row * 30, left, left + 10);
+    };
+  }
+
+  const second = line(130, 150, 0, 100, 0, 0);
+
+  it('finds the first character of a line', () => {
+    assert.equal(core.lineStartOffset(40, charRects(new Set()), second, []),
+        10);
+  });
+
+  it('is not misled by collapsed white space after the line start', () => {
+    // Indentation from the HTML source on the third line: the search probes
+    // offset 20 first, which has no rect.
+    const rectAt = charRects(new Set([20, 21, 22, 23, 24]));
+    assert.equal(core.lineStartOffset(40, rectAt, second, []), 10);
+    const third = line(160, 180, 0, 100, 0, 0);
+    assert.equal(core.lineStartOffset(40, rectAt, third, []), 25);
+  });
+
+  it('skips collapsed white space at the line start', () => {
+    const offset = core.lineStartOffset(40, charRects(new Set([10, 11])),
+        second, []);
+    assert.equal(offset, 12);
+  });
+
+  it('returns the length if nothing is rendered', () => {
+    assert.equal(core.lineStartOffset(5, () => null, second, []), 5);
+  });
+
+  it('follows CSS columns in reading order', () => {
+    // Characters 0–19 in the left column (rows 0–1), 20–39 in the right one
+    // (rows 0–1 again).
+    const columns = [rect(0, 400, 0, 300), rect(0, 400, 340, 640)];
+    const rectAt = (index) => {
+      const column = index < 20 ? 0 : 1;
+      const row = Math.floor((index % 20) / 10);
+      const left = column * 340 + (index % 10) * 10;
+      return rect(100 + row * 30, 120 + row * 30, left, left + 10);
+    };
+    const target = line(100, 120, 340, 440, 0, 1);
+    assert.equal(core.lineStartOffset(40, rectAt, target, columns), 20);
+  });
+});
+
+describe('bands', () => {
+  const band = {top: 100, bottom: 700};
+
+  it('detects lines outside and inside a band', () => {
+    assert.ok(core.isOutsideBand(rect(40, 60, 0, 10), band));
+    assert.ok(core.isOutsideBand(rect(700, 720, 0, 10), band));
+    assert.ok(!core.isOutsideBand(rect(90, 110, 0, 10), band));
+    assert.ok(core.isInsideBand(rect(100, 120, 0, 10), band));
+    assert.ok(!core.isInsideBand(rect(90, 110, 0, 10), band));
+  });
+
+  it('probes from the top or the bottom', () => {
+    const heights = core.probeHeights({top: 0, bottom: 50}, 20, 1);
+    assert.deepEqual(heights, [10, 30]);
+    assert.deepEqual(core.probeHeights({top: 0, bottom: 50}, 20, -1),
+        [30, 10]);
   });
 });
 
@@ -374,6 +522,15 @@ describe('container scoring', () => {
     assert.equal(div - list, 8);
     assert.equal(content - div, 25);
     assert.equal(div - comments, 25);
+  });
+
+  it('requires a minimum of paragraph text', () => {
+    const {minText} = core.config.scoring;
+    assert.ok(core.hasEnoughText([{textLength: minText}]));
+    assert.ok(core.hasEnoughText(
+        [{textLength: minText / 2}, {textLength: minText / 2}]));
+    assert.ok(!core.hasEnoughText([{textLength: minText - 1}]));
+    assert.ok(!core.hasEnoughText([]));
   });
 
   it('weights deeper paragraphs less', () => {
@@ -540,6 +697,14 @@ describe('computeScrollTarget', () => {
   it('does not scroll pages that fit the view', () => {
     assert.equal(core.computeScrollTarget(
         {...base, scrollTop: 0, maxScrollTop: -10}), 0);
+  });
+});
+
+describe('withoutHash', () => {
+  it('drops the fragment of a URL', () => {
+    assert.equal(core.withoutHash('https://a.com/post?id=1#section-2'),
+        'https://a.com/post?id=1');
+    assert.equal(core.withoutHash('https://a.com/post'), 'https://a.com/post');
   });
 });
 

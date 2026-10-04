@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: web app</title>
+<style>
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 16px/24px sans-serif;
+    margin: 16px;
+  }
+</style>
+</head>
+<body>
+<!-- No article-like content: the ruler stays off. -->
+<div class="toolbar">Inbox · Drafts · Sent</div>
+<ul class="messages">
+  <li id="message">Meeting moved to Friday afternoon</li>
+  <li>Your invoice is ready</li>
+  <li>Weekly report</li>
+</ul>
+<p id="status">3 messages, 1 unread.</p>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: article</title>
+<style>
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 16px/24px monospace;
+    margin: 0;
+  }
+
+  .site-header {
+    background: #eee;
+    height: 48px;
+    left: 0;
+    position: fixed;
+    right: 0;
+    top: 0;
+  }
+
+  nav {
+    left: 8px;
+    position: absolute;
+    top: 64px;
+    width: 150px;
+  }
+
+  main {
+    margin: 64px auto 0;
+    width: 600px;
+  }
+
+  .sticky {
+    background: #fff;
+    position: sticky;
+    top: 48px;
+  }
+
+  .columns {
+    column-count: 2;
+    column-gap: 40px;
+  }
+
+  .spacer {
+    height: 1200px;
+  }
+</style>
+</head>
+<body>
+<header class="site-header">Site header with a menu</header>
+<nav>
+  <a href="#home">Home</a>
+  <a href="#about">About</a>
+</nav>
+<main>
+  <article>
+    <h1 id="title">A fixture article</h1>
+    <!-- Source indentation inside the paragraph collapses to single spaces:
+         those characters have no rects. -->
+    <p id="indented">
+      Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do
+      eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim
+      ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut
+      aliquip ex ea commodo consequat. Duis aute irure dolor in
+      reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla
+      pariatur. Excepteur sint occaecat cupidatat non proident, sunt in
+      culpa qui officia deserunt mollit anim id est laborum.
+    </p>
+    <h2 class="sticky" id="sticky">A sticky section heading</h2>
+    <div id="plain">Alpha line of a div without paragraphs<br>Bravo line
+      after a line break<br>Charlie line after another break</div>
+    <div class="columns">
+      <p id="split">Columns one two three four five six seven eight nine
+        ten eleven twelve thirteen fourteen fifteen sixteen seventeen
+        eighteen nineteen twenty twentyone twentytwo twentythree twentyfour
+        twentyfive twentysix twentyseven twentyeight twentynine thirty
+        thirtyone thirtytwo thirtythree thirtyfour thirtyfive thirtysix
+        thirtyseven thirtyeight thirtynine forty fortyone fortytwo end.</p>
+    </div>
+    <div class="spacer"></div>
+    <p id="last">The last paragraph lies far below the fold. It is long
+      enough to wrap onto several lines, so that a line of it is fully
+      visible when the reader scrolls down to it with the mouse wheel and
+      then continues with the arrow keys.</p>
+  </article>
+</main>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: nested scroll container</title>
+<style>
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 16px/24px monospace;
+    margin: 0;
+  }
+
+  .intro {
+    height: 560px;
+  }
+
+  .pane {
+    height: 160px;
+    margin: 0 auto;
+    overflow-y: auto;
+    width: 600px;
+  }
+
+  .outro {
+    height: 800px;
+  }
+</style>
+</head>
+<body>
+<div class="intro"></div>
+<!-- Only the top of the pane is in view at first: moving down has to
+     scroll the pane and the page. -->
+<div class="pane">
+  <article>
+    <p id="first">The first paragraph of the scrolling pane holds enough
+      text to wrap onto several lines, with commas, clauses, and a few more
+      words, so that the content detection treats the pane as an article.</p>
+    <p>The second paragraph continues the text, again with commas, clauses,
+      and enough words to fill several lines of the narrow pane.</p>
+    <p>The third paragraph adds more lines, so that the pane has to scroll
+      while the reader moves down line by line with the arrow keys.</p>
+    <p>The fourth paragraph ends the article, after which the pane cannot
+      scroll any further and the page has to bring the line into view.</p>
+  </article>
+</div>
+<div class="outro"></div>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

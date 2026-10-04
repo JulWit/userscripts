@@ -1,0 +1,13 @@
+{
+  "name": "userscripts",
+  "private": true,
+  "description": "Personal userscripts for Violentmonkey",
+  "scripts": {
+    "test": "node --test",
+    "test:e2e": "node --test tests/e2e/reading-ruler.e2e.js",
+    "typecheck": "npx -p typescript tsc -p jsconfig.json"
+  },
+  "devDependencies": {
+    "playwright": "^1.55.0"
+  }
+}

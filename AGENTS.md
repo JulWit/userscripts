@@ -25,6 +25,9 @@ A collection of personal userscripts, located in `scripts/` as `*.user.js` files
   stops before touching the page.
 - Tests live in `tests/*.test.js` and use `node:test`; run them with
   `node --test`.
+- Behavior on real pages is covered by end-to-end tests in `tests/e2e/`
+  (Playwright, Firefox) on the fixture pages in `tests/fixtures/`; run them
+  with `npm run test:e2e`.
 - Scripts are type-checked from their JSDoc annotations
   (`tsc -p jsconfig.json`); GM_* declarations live in `types/`. Keep both
   passing after every change.
