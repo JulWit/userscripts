@@ -264,6 +264,23 @@ describe('article page', () => {
     await page.close();
   });
 
+  it('keeps the arrow keys from the page while a line is selected',
+      async () => {
+        const page = await open('article.html');
+        await page.evaluate(() => {
+          window.pageKeys = 0;
+          document.addEventListener('keydown', () => window.pageKeys++);
+        });
+        await clickWord(page, '#indented', 'aliquip');
+        await page.keyboard.press('ArrowDown');
+        assert.equal(await page.evaluate(() => window.pageKeys), 0);
+        // Without a selection, and for Escape, the page gets its keys.
+        await page.keyboard.press('Escape');
+        await page.keyboard.press('ArrowDown');
+        assert.equal(await page.evaluate(() => window.pageKeys), 2);
+        await page.close();
+      });
+
   it('clears the selection with Escape', async () => {
     const page = await open('article.html');
     await clickWord(page, '#indented', 'aliquip');
@@ -290,31 +307,94 @@ describe('page without an article', () => {
   });
 });
 
+/**
+ * Moves the selection by real key presses and checks that every press moves
+ * exactly one line.
+ * @param {!import('playwright').Page} page
+ * @param {string} key
+ * @param {number} presses
+ * @param {number} lineHeight
+ */
+async function assertLineByLine(page, key, presses, lineHeight) {
+  const sign = key === 'ArrowDown' ? 1 : -1;
+  let previous = await ruler(page);
+  for (let step = 0; step < presses; step++) {
+    await page.keyboard.press(key);
+    const box = await ruler(page);
+    assert.ok(Math.abs((box.top - previous.top) * sign - lineHeight) < 1,
+        `${key} ${step}: ${previous.top} → ${box.top}`);
+    previous = box;
+  }
+}
+
+/**
+ * Time the script takes per arrow key, measured inside the page, so that
+ * the round trips of the test driver do not count. The key events are
+ * dispatched by the page; the script does not require trusted key events.
+ * @param {!import('playwright').Page} page
+ * @param {number} presses
+ * @return {!Promise<number>} Median in ms.
+ */
+function medianMoveTime(page, presses) {
+  return page.evaluate((presses) => {
+    const times = [];
+    for (let step = 0; step < presses; step++) {
+      const start = performance.now();
+      document.body.dispatchEvent(new KeyboardEvent('keydown',
+          {key: 'ArrowDown', bubbles: true, cancelable: true}));
+      times.push(performance.now() - start);
+    }
+    times.sort((a, b) => a - b);
+    return times[Math.floor(times.length / 2)];
+  }, presses);
+}
+
 describe('long code block', () => {
-  it('moves line by line across the measured windows, quickly', async () => {
+  it('moves line by line across the measured windows', async () => {
     const page = await open('code.html');
     await clickWord(page, '#code', 'value0');
-    let previous = await ruler(page);
-    const start = Date.now();
     // 6 text nodes per line: 120 lines cross several windows of
     // CONFIG.maxSegmentTexts text nodes.
-    const presses = 120;
-    for (let step = 0; step < presses; step++) {
-      await page.keyboard.press('ArrowDown');
-      const box = await ruler(page);
-      assert.ok(Math.abs(box.top - previous.top - 24) < 1,
-          `step ${step}: ${previous.top} → ${box.top}`);
-      previous = box;
-    }
-    // Generous: measuring the whole block took about 100 ms per press.
-    assert.ok((Date.now() - start) / presses < 60);
-    for (let step = 0; step < presses; step++) {
-      await page.keyboard.press('ArrowUp');
-      const box = await ruler(page);
-      assert.ok(Math.abs(previous.top - box.top - 24) < 1,
-          `step ${step} up: ${previous.top} → ${box.top}`);
-      previous = box;
-    }
+    await assertLineByLine(page, 'ArrowDown', 120, 24);
+    await assertLineByLine(page, 'ArrowUp', 120, 24);
+    await page.close();
+  });
+
+  it('moves quickly in a block with thousands of text nodes', async () => {
+    const page = await open('code.html');
+    await clickWord(page, '#code', 'value0');
+    // Measuring the whole block took about 100 ms per key.
+    const median = await medianMoveTime(page, 40);
+    assert.ok(median < 40, `median ${median} ms`);
+    await page.close();
+  });
+
+  it('moves line by line and quickly in a single long text node',
+      async () => {
+        const page = await open('plain.html');
+        await clickWord(page, '#code', 'value10 ');
+        await assertLineByLine(page, 'ArrowDown', 20, 24);
+        await assertLineByLine(page, 'ArrowUp', 20, 24);
+        // Grouping thousands of rects took about 30 ms per key.
+        const median = await medianMoveTime(page, 40);
+        assert.ok(median < 25, `median ${median} ms`);
+        await page.close();
+      });
+});
+
+describe('strict style policy', () => {
+  it('shows the highlight without its style sheet', async () => {
+    const page = await open('csp.html');
+    const word = await clickWord(page, '#first', 'policy');
+    assert.ok(covers(await ruler(page), word));
+    const style = await page.evaluate(() => {
+      const shadow = document.querySelector('reading-ruler').shadowRoot;
+      const computed = getComputedStyle(shadow.querySelector('.rr-ruler'));
+      return {position: computed.position,
+        background: computed.backgroundColor};
+    });
+    assert.equal(style.position, 'absolute');
+    assert.equal(style.background, 'rgba(255, 196, 0, 0.3)');
     await page.close();
   });
 });

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: long text node</title>
+<style>
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 16px/24px monospace;
+    margin: 0;
+  }
+
+  main {
+    margin: 16px auto;
+    width: 700px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <article>
+    <p id="intro">An article about code, with commas, clauses, and enough
+      words to make the article the content root of this page without any
+      doubt at all.</p>
+    <pre id="code"></pre>
+    <p>A closing paragraph after the code, again with commas, clauses, and
+      plenty of words to keep the content detection happy.</p>
+  </article>
+</main>
+<script>
+  // 3000 lines of plain code in a single text node: thousands of client
+  // rects for one node.
+  const lines = [];
+  for (let line = 0; line < 3000; line++) {
+    lines.push(`const value${line} = 'text ${line}';`);
+  }
+  document.getElementById('code').textContent = lines.join('\n');
+</script>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

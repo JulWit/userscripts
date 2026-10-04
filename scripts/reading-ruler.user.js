@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reading Ruler
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.2.0
+// @version      1.2.1
 // @description  Highlights one line of an article at a time: click or tap a line, then move with the arrow keys
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -294,7 +294,10 @@
    * elements such as links and emphasis split a line into several rects;
    * they are merged. Empty rects and unusually tall ones (drop caps) are
    * ignored. In a block split by CSS columns, only rects of the same column
-   * are merged.
+   * are merged. Rects come in document order, so a rect belongs to one of
+   * the latest lines of its column: the search runs backwards and stops at
+   * the first line of the column that lies completely above the rect, which
+   * keeps long text nodes (thousands of lines) linear.
    * @param {!Array<!Fragment>} rects Fragment rects in document order.
    * @param {!Array<!Box>=} columns Content boxes of the block.
    * @return {!Array<!Line>} Lines in reading order: by column, then from top
@@ -314,8 +317,17 @@
       if (usable.length >= 3 && rect.bottom - rect.top > maxHeight) continue;
       const column =
           columns.length > 1 ? Math.max(0, pickColumnIndex(columns, rect)) : 0;
-      const line = lines.find((candidate) =>
-        candidate.column === column && onSameLine(candidate, rect));
+      /** @type {?Line} */
+      let line = null;
+      for (let index = lines.length - 1; index >= 0; index--) {
+        const candidate = lines[index];
+        if (candidate.column !== column) continue;
+        if (onSameLine(candidate, rect)) {
+          line = candidate;
+          break;
+        }
+        if (candidate.bottom <= rect.top) break;
+      }
       if (line) {
         line.top = Math.min(line.top, rect.top);
         line.bottom = Math.max(line.bottom, rect.bottom);
@@ -1658,75 +1670,60 @@
   // Highlight and touch controls (Shadow DOM, outside the page's layout)
   // ===========================================================================
 
+  // The look of the highlight and the controls is set inline through the
+  // CSSOM, which no Content Security Policy blocks: in Firefox, a script
+  // manager may have to run the script as a content script on pages with a
+  // strict policy, where the style sheet below can fail to apply. The sheet
+  // only adds what inline styles cannot express; it overrides inline styles
+  // with !important where needed.
+  const RULER_STYLE = {
+    'background': 'rgba(255, 196, 0, .3)',
+    'border-radius': '4px',
+    'box-shadow': '0 0 0 1px rgba(255, 166, 0, .55)',
+    'box-sizing': 'border-box',
+    'left': '0',
+    'pointer-events': 'none',
+    'position': 'absolute',
+    'top': '0',
+  };
+  const CONTROLS_STYLE = {
+    'align-items': 'center',
+    'bottom': 'max(16px, env(safe-area-inset-bottom))',
+    'display': 'none',
+    'flex-direction': 'column',
+    'gap': '8px',
+    'pointer-events': 'auto',
+    'position': 'fixed',
+    'right': 'max(12px, env(safe-area-inset-right))',
+  };
+  const CONTROL_STYLE = {
+    '-webkit-tap-highlight-color': 'transparent',
+    'align-items': 'center',
+    'background': 'rgba(32, 33, 36, .75)',
+    'border': '1px solid rgba(255, 255, 255, .3)',
+    'border-radius': '50%',
+    'box-shadow': '0 2px 8px rgba(0, 0, 0, .35)',
+    'color': '#fff',
+    'cursor': 'pointer',
+    'display': 'flex',
+    'height': '44px',
+    'justify-content': 'center',
+    'margin': '0',
+    'padding': '0',
+    'touch-action': 'manipulation',
+    'width': '44px',
+  };
+  const CLOSE_CONTROL_STYLE = {'height': '36px', 'width': '36px'};
+
   const STYLES = `
-    .rr-ruler {
-      background: rgba(255, 196, 0, .3);
-      border-radius: 4px;
-      box-shadow: 0 0 0 1px rgba(255, 166, 0, .55);
-      box-sizing: border-box;
-      left: 0;
-      pointer-events: none;
-      position: absolute;
-      top: 0;
-    }
-
-    .rr-ruler[hidden],
-    .rr-controls[hidden] {
-      display: none;
-    }
-
     .rr-animate {
       transition: top 120ms ease-out, left 120ms ease-out,
           width 120ms ease-out, height 120ms ease-out;
     }
 
-    .rr-controls {
-      align-items: center;
-      bottom: max(16px, env(safe-area-inset-bottom));
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      pointer-events: auto;
-      position: fixed;
-      right: max(12px, env(safe-area-inset-right));
-    }
-
-    .rr-control {
-      -webkit-tap-highlight-color: transparent;
-      align-items: center;
-      background: rgba(32, 33, 36, .75);
-      border: 1px solid rgba(255, 255, 255, .3);
-      border-radius: 50%;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, .35);
-      color: #fff;
-      cursor: pointer;
-      display: flex;
-      height: 44px;
-      justify-content: center;
-      margin: 0;
-      padding: 0;
-      touch-action: manipulation;
-      width: 44px;
-    }
-
-    .rr-control-close {
-      height: 36px;
-      width: 36px;
-    }
-
     .rr-control:focus-visible {
       outline: 2px solid #ffc400;
       outline-offset: 2px;
-    }
-
-    .rr-icon {
-      fill: none;
-      height: 22px;
-      stroke: currentcolor;
-      stroke-linecap: round;
-      stroke-linejoin: round;
-      stroke-width: 2.5;
-      width: 22px;
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -1737,8 +1734,8 @@
 
     @media (forced-colors: active) {
       .rr-ruler {
-        background: transparent;
-        box-shadow: none;
+        background: transparent !important;
+        box-shadow: none !important;
         outline: 2px solid highlight;
       }
     }
@@ -1746,14 +1743,25 @@
     @media print {
       .rr-ruler,
       .rr-controls {
-        display: none;
+        display: none !important;
       }
     }
   `;
 
   /**
-   * Adds the styles to the shadow root. Constructed style sheets are not
-   * blocked by a Content Security Policy without 'unsafe-inline'.
+   * Sets inline styles.
+   * @param {!HTMLElement} element
+   * @param {!Object<string, string>} styles CSS property names and values.
+   */
+  function setStyles(element, styles) {
+    for (const [name, value] of Object.entries(styles)) {
+      element.style.setProperty(name, value);
+    }
+  }
+
+  /**
+   * Adds the style sheet to the shadow root. Constructed style sheets are
+   * not blocked by a Content Security Policy without 'unsafe-inline'.
    * @param {!ShadowRoot} shadow
    */
   function applyStyles(shadow) {
@@ -1783,11 +1791,24 @@
     button.className = 'rr-control';
     button.title = label;
     button.setAttribute('aria-label', label);
+    setStyles(button, CONTROL_STYLE);
     const svgNs = 'http://www.w3.org/2000/svg';
     const icon = document.createElementNS(svgNs, 'svg');
-    icon.setAttribute('class', 'rr-icon');
-    icon.setAttribute('viewBox', '0 0 24 24');
-    icon.setAttribute('aria-hidden', 'true');
+    // Presentation attributes, like inline styles, need no style sheet.
+    const attributes = {
+      'aria-hidden': 'true',
+      'fill': 'none',
+      'height': '22',
+      'stroke': 'currentColor',
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+      'stroke-width': '2.5',
+      'viewBox': '0 0 24 24',
+      'width': '22',
+    };
+    for (const [name, value] of Object.entries(attributes)) {
+      icon.setAttribute(name, value);
+    }
     const shape = document.createElementNS(svgNs, 'path');
     shape.setAttribute('d', path);
     icon.append(shape);
@@ -1820,12 +1841,14 @@
     const ruler = document.createElement('div');
     ruler.className = 'rr-ruler';
     ruler.hidden = true;
+    setStyles(ruler, RULER_STYLE);
     const controls = document.createElement('div');
     controls.className = 'rr-controls';
     controls.hidden = true;
+    setStyles(controls, CONTROLS_STYLE);
     const close = createControl(
         'Stop reading ruler', 'M7 7l10 10M17 7L7 17', clearSelection);
-    close.classList.add('rr-control-close');
+    setStyles(close, CLOSE_CONTROL_STYLE);
     controls.append(
         close,
         createControl('Previous line', 'M6 15l6-6 6 6', () => move(-1)),
@@ -1834,6 +1857,17 @@
     document.documentElement.append(host);
     state.ui = {host, ruler, controls};
     return state.ui;
+  }
+
+  /**
+   * Shows or hides the touch controls. Their display is set inline, where
+   * it would override the hidden attribute.
+   * @param {!HTMLElement} controls
+   * @param {boolean} visible
+   */
+  function showControls(controls, visible) {
+    controls.hidden = !visible;
+    controls.style.display = visible ? 'flex' : 'none';
   }
 
   /**
@@ -1898,7 +1932,7 @@
     ruler.style.width = `${next.width}px`;
     ruler.style.height = `${next.height}px`;
     ruler.hidden = false;
-    controls.hidden = !matchMedia(CONFIG.touchQuery).matches;
+    showControls(controls, matchMedia(CONFIG.touchQuery).matches);
     state.placement = next;
     const block = ref.segment.block;
     state.signature = {block, value: layoutSignature(block)};
@@ -1912,7 +1946,7 @@
     if (!ui) return;
     ui.ruler.hidden = true;
     ui.ruler.classList.remove('rr-animate');
-    ui.controls.hidden = true;
+    showControls(ui.controls, false);
   }
 
   // ===========================================================================
@@ -2424,7 +2458,8 @@
   }
 
   /**
-   * Arrow keys move the selection, Escape clears it.
+   * Arrow keys move the selection, Escape clears it (and still reaches the
+   * page, e.g. to close a dialog).
    * @param {!KeyboardEvent} event
    */
   function onKeyDown(event) {
@@ -2439,7 +2474,11 @@
       clearSelection();
       return;
     }
+    // While a line is selected the arrow keys belong to the ruler: the
+    // page's own handlers (galleries, slide shows) must not react as well.
+    // This listener captures on window, so it runs before the page's.
     event.preventDefault();
+    event.stopPropagation();
     move(key === 'ArrowDown' ? 1 : -1);
   }
 

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Blocks every style element, including one in the ruler's shadow root.
+     Inline styles set through the CSSOM stay allowed. -->
+<meta http-equiv="Content-Security-Policy" content="style-src 'none'">
+<title>Fixture: strict style policy</title>
+</head>
+<body>
+<main>
+  <article>
+    <p id="first">A paragraph on a page whose policy blocks style sheets,
+      with commas, clauses, and enough words to make the article the
+      content root of this page without any doubt at all.</p>
+    <p>A second paragraph, again with commas, clauses, and plenty of words
+      to keep the content detection happy.</p>
+  </article>
+</main>
+<script>
+  // As in a Firefox content script: assigning adoptedStyleSheets fails, so
+  // the ruler falls back to a style element, which the policy blocks.
+  Object.defineProperty(ShadowRoot.prototype, 'adoptedStyleSheets', {
+    get() {
+      return [];
+    },
+    set() {
+      throw new TypeError('Accessing from Xray wrapper is not supported.');
+    },
+  });
+</script>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

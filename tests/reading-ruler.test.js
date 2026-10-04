@@ -178,6 +178,31 @@ describe('groupRectsIntoLines', () => {
     assert.deepEqual(lines.map((entry) => entry.source), [2, 1, 0]);
   });
 
+  it('groups the rects of thousands of lines', () => {
+    // A long text node: each line yields its text and a line-break rect.
+    const rects = [];
+    for (let row = 0; row < 3000; row++) {
+      const top = 100 + row * 24;
+      rects.push(rect(top, top + 19, 0, 300, rects.length));
+      rects.push(rect(top, top + 19, 300, 309, rects.length));
+    }
+    const lines = core.groupRectsIntoLines(rects);
+    assert.equal(lines.length, 3000);
+    assert.deepEqual(lines[2999], line(100 + 2999 * 24, 119 + 2999 * 24,
+        0, 309, 5998));
+  });
+
+  it('finds the line of a column behind lines of another one', () => {
+    const lines = core.groupRectsIntoLines([
+      rect(100, 120, 0, 200, 0),
+      rect(10, 30, 340, 640, 1),
+      rect(40, 60, 340, 640, 2),
+      rect(100, 120, 200, 300, 3),
+    ], columns);
+    assert.deepEqual(lines[0], line(100, 120, 0, 300, 0, 0));
+    assert.equal(lines.length, 3);
+  });
+
   it('ignores a single column box', () => {
     const lines = core.groupRectsIntoLines([rect(100, 120, 0, 300, 0)],
         [rect(0, 400, 0, 600)]);
