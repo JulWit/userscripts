@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reading Ruler
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.2.1
+// @version      1.2.2
 // @description  Highlights one line of an article at a time: click or tap a line, then move with the arrow keys
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -27,7 +27,11 @@
  * viewport. The selection is stored as a text position, so it survives
  * reflows, and lines are only measured when needed.
  * Known limitations: text inside shadow DOM (web components) cannot be
- * selected, and text in a vertical writing mode is skipped.
+ * selected, and text in a vertical writing mode is skipped. In a scroll
+ * container inside the page, the highlight follows the text after each
+ * scroll event, so it trails by a frame or two while the container scrolls
+ * fast (browsers scroll on a separate thread); moving it into the container
+ * would change the page's DOM and layout.
  * Code style: Google JavaScript Style Guide, Google HTML/CSS Style Guide.
  */
 

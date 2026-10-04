@@ -63,14 +63,11 @@ Element.prototype.attachShadow = function(init) {
 };
 
 /**
- * Finds a word in an element.
  * @param {string} selector
  * @param {string} word
- * @return {{x: number, y: number, top: number, bottom: number}} Center of
- *     the word in viewport coordinates, its top and bottom in document
- *     coordinates.
+ * @return {!Range} The first occurrence of the word in the element.
  */
-function wordPoint(selector, word) {
+function wordRange(selector, word) {
   const element = document.querySelector(selector);
   if (!element) throw new Error(`No element ${selector}`);
   const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
@@ -80,15 +77,53 @@ function wordPoint(selector, word) {
     const range = document.createRange();
     range.setStart(node, index);
     range.setEnd(node, index + word.length);
-    const rect = range.getClientRects()[0];
-    return {
-      x: rect.left + rect.width / 2,
-      y: (rect.top + rect.bottom) / 2,
-      top: rect.top + window.scrollY,
-      bottom: rect.bottom + window.scrollY,
-    };
+    return range;
   }
   throw new Error(`No word "${word}" in ${selector}`);
+}
+
+/**
+ * Finds a word in an element.
+ * @param {string} selector
+ * @param {string} word
+ * @return {{x: number, y: number, top: number, bottom: number}} Center of
+ *     the word in viewport coordinates, its top and bottom in document
+ *     coordinates.
+ */
+function wordPoint(selector, word) {
+  const rect = wordRange(selector, word).getClientRects()[0];
+  return {
+    x: rect.left + rect.width / 2,
+    y: (rect.top + rect.bottom) / 2,
+    top: rect.top + window.scrollY,
+    bottom: rect.bottom + window.scrollY,
+  };
+}
+
+/**
+ * Scrolls the page so that a word is in view, if it is not, and finds it.
+ * Words already in view stay where they are, so a test's starting layout is
+ * kept.
+ * @param {string} selector
+ * @param {string} word
+ * @return {{x: number, y: number, top: number, bottom: number,
+ *     hit: boolean}} As wordPoint; hit tells whether the element at the
+ *     word's center is the word's parent element or inside it, i.e.
+ *     whether a click there reaches the word.
+ */
+function revealWord(selector, word) {
+  const range = wordRange(selector, word);
+  const rect = range.getClientRects()[0];
+  if (rect.top < 0 || rect.bottom > window.innerHeight) {
+    window.scrollTo({
+      top: window.scrollY + rect.top - window.innerHeight / 2,
+      behavior: 'instant',
+    });
+  }
+  const point = wordPoint(selector, word);
+  const target = document.elementFromPoint(point.x, point.y);
+  const parent = range.startContainer.parentElement;
+  return {...point, hit: !!target && !!parent && parent.contains(target)};
 }
 
 /**
