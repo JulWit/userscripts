@@ -44,8 +44,16 @@ npm run test:e2e
 ```
 
 The fixture pages also work in a normal browser when served over HTTP from
-the repository root: `tests/fixtures/harness.js` stands in for
-Violentmonkey.
+the repository root, for example without Node.js on Windows with
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/serve.ps1
+```
+
+and then <http://localhost:8765/tests/fixtures/article.html>.
+`tests/fixtures/harness.js` stands in for Violentmonkey; with `?touch` in
+the URL the page reports a touch screen, so the Reading Ruler shows its
+floating buttons.
 
 Script icons live as SVG in `icons/` and are embedded in each script's
 `@icon` as a base64 data URI. After editing an icon, regenerate the URI:

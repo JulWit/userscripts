@@ -57,6 +57,15 @@ function GM_registerMenuCommand() {
   return 'harness';
 }
 
+// With ?touch in the URL, the page reports a coarse primary pointer, as on a
+// phone, so that the ruler shows its touch controls in any browser.
+if (new URLSearchParams(location.search).has('touch')) {
+  const harnessMatchMedia = window.matchMedia.bind(window);
+  window.matchMedia = (query) => query.includes('pointer: coarse') ?
+      /** @type {!MediaQueryList} */ ({matches: true, media: query}) :
+      harnessMatchMedia(query);
+}
+
 const harnessAttachShadow = Element.prototype.attachShadow;
 Element.prototype.attachShadow = function(init) {
   return harnessAttachShadow.call(this, {...init, mode: 'open'});

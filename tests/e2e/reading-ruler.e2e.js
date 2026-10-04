@@ -289,6 +289,56 @@ describe('article page', () => {
       }));
 });
 
+/**
+ * Taps one of the ruler's touch controls.
+ * @param {!import('playwright').Page} page
+ * @param {string} label Accessible name of the button.
+ */
+async function tapControl(page, label) {
+  const point = await page.evaluate((label) => {
+    const button = document.querySelector('reading-ruler').shadowRoot
+        .querySelector(`button[aria-label="${label}"]`);
+    const rect = button.getBoundingClientRect();
+    return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+  }, label);
+  await page.mouse.click(point.x, point.y);
+}
+
+/**
+ * @param {!import('playwright').Page} page
+ * @return {!Promise<string>} Computed display of the touch controls.
+ */
+function controlsDisplay(page) {
+  return page.evaluate(() => getComputedStyle(
+      document.querySelector('reading-ruler').shadowRoot
+          .querySelector('.rr-controls')).display);
+}
+
+describe('touch controls', () => {
+  it('move the selection and close the ruler', () => withPage(
+      'article.html?touch', async (page) => {
+        await clickWord(page, '#indented', 'aliquip');
+        const start = await ruler(page);
+        assert.equal(await controlsDisplay(page), 'flex');
+        await tapControl(page, 'Next line');
+        const next = await ruler(page);
+        assert.ok(Math.abs(next.top - start.top - 24) < 1,
+            `${start.top} → ${next.top}`);
+        await tapControl(page, 'Previous line');
+        assertSameBox(await ruler(page), start);
+        await tapControl(page, 'Stop reading ruler');
+        assert.equal(await ruler(page), null);
+        assert.equal(await controlsDisplay(page), 'none');
+      }));
+
+  it('are hidden for a fine pointer', () => withPage('article.html',
+      async (page) => {
+        await clickWord(page, '#indented', 'aliquip');
+        assert.ok(await ruler(page));
+        assert.equal(await controlsDisplay(page), 'none');
+      }));
+});
+
 describe('page without an article', () => {
   it('leaves clicks on text alone', () => withPage('webapp.html',
       async (page) => {
