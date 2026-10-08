@@ -20,6 +20,7 @@ declare function GM_registerMenuCommand(
 /** Set by the unit tests before loading a script (see tests/). */
 declare var dealScoreTestHook: ((core: object) => void) | undefined;
 declare var readingRulerTestHook: ((core: object) => void) | undefined;
+declare var speedReaderTestHook: ((core: object) => void) | undefined;
 
 interface Window {
   /** Debug handle of the Steam Deal Score script. */

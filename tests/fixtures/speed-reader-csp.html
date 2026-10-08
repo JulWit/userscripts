@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Blocks every style element, also in the reader window, which inherits
+     the policy. Inline styles set through the CSSOM stay allowed. -->
+<meta http-equiv="Content-Security-Policy" content="style-src 'none'">
+<title>Fixture: speed reader with a strict style policy</title>
+</head>
+<body>
+<main>
+  <article>
+    <h1>Strict policy</h1>
+    <p>A paragraph on a page whose policy blocks style sheets, with commas,
+      clauses, and enough words to make the article the content root of
+      this page without any doubt at all.</p>
+    <p>A second paragraph, again with commas, clauses, and plenty of words
+      to keep the content detection happy, and a few more for good luck.</p>
+  </article>
+</main>
+<script>
+  // As in a Firefox content script: adopting a style sheet in the reader
+  // window fails, so the reader falls back to a style element, which the
+  // policy blocks.
+  const fixtureOpen = window.open;
+  window.open = function(...args) {
+    const win = fixtureOpen.apply(this, args);
+    if (win) {
+      Object.defineProperty(win.Document.prototype, 'adoptedStyleSheets', {
+        get() {
+          return [];
+        },
+        set() {
+          throw new TypeError('Accessing from Xray wrapper is not supported.');
+        },
+      });
+    }
+    return win;
+  };
+</script>
+<script src="harness.js"></script>
+<script src="../../scripts/speed-reader.user.js"></script>
+</body>
+</html>

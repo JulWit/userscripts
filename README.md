@@ -8,6 +8,7 @@ A collection of my personal userscripts.
 |---|---|---|
 | [Steam Deal Score](scripts/steam-dealscore.user.js) | Shows a deal score (1–100) based on reviews, discount, price and popularity on the Steam wishlist, cart and store pages. | [Install](https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/steam-dealscore.user.js) |
 | [Reading Ruler](scripts/reading-ruler.user.js) | Highlights one line of an article at a time: click or tap a line, then move with the arrow keys (or floating buttons on touch devices). Stays off on pages without article-like content and can be disabled per site from the script menu. | [Install](https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/reading-ruler.user.js) |
+| [Speed Reader](scripts/speed-reader.user.js) | Shows the main text of a page, or the selected text, word by word in a reader window (RSVP), aligned at a highlighted fixation letter. Play, pause, skip back and forward, adjustable speed and font size; started from the script menu. | [Install](https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/speed-reader.user.js) |
 
 ## Installation
 
@@ -34,7 +35,7 @@ npx -p typescript tsc -p jsconfig.json
 type-checks the scripts against their JSDoc annotations in strict mode
 (editors such as VS Code and Zed do this automatically via `jsconfig.json`).
 
-The end-to-end tests in `tests/e2e/` run both scripts in Firefox on the
+The end-to-end tests in `tests/e2e/` run the scripts in Firefox on the
 pages in `tests/fixtures/` and need [Playwright](https://playwright.dev/).
 The Steam fixtures are served by Playwright under
 `https://store.steampowered.com`, together with made-up review data, so the
@@ -59,6 +60,10 @@ the URL the page reports a touch screen, so the Reading Ruler shows its
 floating buttons. The Steam fixtures (`steam-*.html`) are meant for the
 end-to-end tests: the script picks its page type by the Steam URL path and
 loads review data from Steam, which only the tests provide.
+On the Speed Reader fixtures (`speed-reader*.html`), the harness stands in
+for the script menu too: run
+`harnessRunMenuCommand('Speed Reader: Read this page')` in the browser
+console (the browser may ask to allow the pop-up).
 
 Script icons live as SVG in `icons/` and are embedded in each script's
 `@icon` as a base64 data URI. After editing an icon, regenerate the URI:

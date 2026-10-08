@@ -66,9 +66,38 @@ function harnessSetRemoteValue(key, value) {
   }
 }
 
-/** @return {string} */
-function GM_registerMenuCommand() {
-  return 'harness';
+/**
+ * Registered menu commands by ID; a command registered again with the same
+ * ID replaces the old one, as in Violentmonkey.
+ * @type {!Map<string, {caption: string, callback: !Function}>}
+ */
+const harnessMenuCommands = new Map();
+
+/**
+ * @param {string} caption
+ * @param {!Function} callback
+ * @param {{id: (string|undefined)}=} options
+ * @return {string}
+ */
+function GM_registerMenuCommand(caption, callback, options) {
+  const id = (options && options.id) || caption;
+  harnessMenuCommands.set(id, {caption, callback});
+  return id;
+}
+
+/**
+ * Runs a menu command as if it was picked from the script manager's menu:
+ * without a user action in the page.
+ * @param {string} caption
+ */
+function harnessRunMenuCommand(caption) {
+  for (const command of harnessMenuCommands.values()) {
+    if (command.caption === caption) {
+      command.callback(new MouseEvent('click'));
+      return;
+    }
+  }
+  throw new Error(`No menu command "${caption}"`);
 }
 
 // With ?touch in the URL, the page reports a coarse primary pointer, as on a

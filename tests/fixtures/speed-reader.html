@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: speed reader</title>
+<style>
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 16px/24px serif;
+    margin: 0;
+  }
+
+  .site-header {
+    background: #eee;
+    height: 48px;
+    left: 0;
+    position: fixed;
+    right: 0;
+    top: 0;
+  }
+
+  .layout {
+    display: flex;
+    gap: 24px;
+    margin: 64px auto 0;
+    width: 900px;
+  }
+
+  main {
+    flex: 1;
+  }
+
+  .sidebar {
+    width: 200px;
+  }
+
+  .visually-hidden {
+    clip: rect(0 0 0 0);
+    height: 1px;
+    overflow: hidden;
+    position: absolute;
+    width: 1px;
+  }
+</style>
+</head>
+<body>
+<header class="site-header">
+  <nav><a href="#">Home</a> <a href="#">World</a> <a href="#">Travel</a></nav>
+</header>
+<div class="layout">
+  <main>
+    <article>
+      <h1 id="title">Steam on the Danube</h1>
+      <p id="first">The first steamboat reached Vienna in 1830, and travel on
+        the river changed for good. Ships carried coal, grain, and passengers
+        between the cities[1] along its banks.</p>
+      <p id="second">The Donau&shy;dampf&shy;schiff&shy;fahrts&shy;gesellschaft
+        became the largest inland shipping company of its time; its fleet
+        grew every year. Zero&#8203;width spaces must vanish too.</p>
+      <p class="visually-hidden">Hidden helper text for screen readers.</p>
+      <p hidden>Hidden paragraph that nobody should read.</p>
+      <p style="display: none">Another paragraph without display.</p>
+      <pre><code>const secret = 'code block';</code></pre>
+      <h2>Canals and routes</h2>
+      <p id="third">Plans for the Rhein-Main-Donau-Kanal-Verbindung are
+        described at https://example.com/history/canals/rhein-main-donau in
+        great detail, with maps.<sup class="reference"><a
+        href="#fn2">[2]</a></sup></p>
+      <p id="last">Today, cruise ships follow the same route, and many
+        travelers enjoy the slow pace of the journey through several
+        countries.</p>
+      <div class="share-links"><a href="#">Share on social media</a> and
+        tell your friends</div>
+    </article>
+    <section class="comments">
+      <h2>Comments</h2>
+      <p>Comment text that should not appear in the reader at all, even
+        though it is long enough to be a paragraph.</p>
+    </section>
+  </main>
+  <aside class="sidebar">
+    <h2>Trending</h2>
+    <p>Sidebar words that must never be read in the reader, no matter
+      how long this paragraph is.</p>
+  </aside>
+</div>
+<footer>Footer text of the site.</footer>
+<script src="harness.js"></script>
+<script src="../../scripts/speed-reader.user.js"></script>
+</body>
+</html>

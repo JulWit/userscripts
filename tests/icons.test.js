@@ -11,7 +11,7 @@ const path = require('node:path');
 const {describe, it} = require('node:test');
 
 const ROOT = path.join(__dirname, '..');
-const SCRIPTS = ['reading-ruler', 'steam-dealscore'];
+const SCRIPTS = ['reading-ruler', 'speed-reader', 'steam-dealscore'];
 const PREFIX = 'data:image/svg+xml;base64,';
 
 describe('@icon', () => {
