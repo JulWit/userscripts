@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: focus outside the text</title>
+<!--
+  An article with a focusable code block that scrolls, and a modal dialog
+  with a scrolling list: while one of them has the focus, the arrow keys
+  and Escape belong to it.
+-->
+<style>
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 16px/24px monospace;
+    margin: 0;
+  }
+
+  main {
+    margin: 16px auto;
+    width: 600px;
+  }
+
+  #code {
+    height: 96px;
+    margin: 0;
+    overflow-y: auto;
+  }
+
+  #options {
+    height: 96px;
+    overflow-y: auto;
+  }
+</style>
+</head>
+<body>
+<main>
+  <article>
+    <p id="intro">The introduction holds enough text to wrap onto several
+      lines, with commas, clauses, and a few more words, so that the content
+      detection treats this page as an article worth reading.</p>
+    <pre id="code" tabindex="0">const line0 = 'zero';
+const line1 = 'one';
+const line2 = 'two';
+const line3 = 'three';
+const line4 = 'four';
+const line5 = 'five';
+const line6 = 'six';
+const line7 = 'seven';
+const line8 = 'eight';
+const line9 = 'nine';
+const line10 = 'ten';
+const line11 = 'eleven';</pre>
+    <p id="outro">The closing paragraph again has commas, clauses, and
+      plenty of words, so that there is text after the code block to move
+      to with the arrow keys.</p>
+  </article>
+</main>
+<dialog id="dialog">
+  <div id="options" tabindex="0">
+    <div>Option 0</div>
+    <div>Option 1</div>
+    <div>Option 2</div>
+    <div>Option 3</div>
+    <div>Option 4</div>
+    <div>Option 5</div>
+    <div>Option 6</div>
+    <div>Option 7</div>
+    <div>Option 8</div>
+    <div>Option 9</div>
+  </div>
+  <button type="button" id="ok">OK</button>
+</dialog>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

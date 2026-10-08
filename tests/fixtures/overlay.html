@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: article in a dialog</title>
+<!--
+  The article is shown in a focusable dialog overlay, as when a site opens
+  a post on top of a feed: the dialog holds the selected line, so the
+  arrow keys keep moving it.
+-->
+<style>
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 16px/24px monospace;
+    margin: 0;
+  }
+
+  #overlay {
+    background: #fff;
+    inset: 0;
+    overflow-y: auto;
+    position: fixed;
+  }
+
+  article {
+    margin: 16px auto;
+    width: 600px;
+  }
+</style>
+</head>
+<body>
+<p>The feed behind the overlay.</p>
+<div id="overlay" role="dialog" aria-modal="true" tabindex="-1">
+  <article>
+    <p id="first">The first paragraph of the post holds enough text to wrap
+      onto several lines, with commas, clauses, and a few more words, so
+      that the content detection treats the dialog's post as an article.</p>
+    <p id="second">The second paragraph continues the post, again with
+      commas, clauses, and enough words to fill several lines.</p>
+  </article>
+</div>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

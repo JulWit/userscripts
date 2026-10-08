@@ -192,6 +192,33 @@ describe('groupRectsIntoLines', () => {
         0, 309, 5998));
   });
 
+  it('grows linearly with the number of lines', () => {
+    /**
+     * @param {number} rows
+     * @return {number} Fastest of several runs in ms.
+     */
+    const timeFor = (rows) => {
+      const rects = [];
+      for (let row = 0; row < rows; row++) {
+        const top = 100 + row * 24;
+        rects.push(rect(top, top + 19, 0, 300, rects.length));
+        rects.push(rect(top, top + 19, 300, 309, rects.length));
+      }
+      let best = Infinity;
+      for (let run = 0; run < 7; run++) {
+        const start = performance.now();
+        core.groupRectsIntoLines(rects);
+        best = Math.min(best, performance.now() - start);
+      }
+      return best;
+    };
+    timeFor(1000);
+    // Ten times the lines: about ten times the time. Comparing every rect
+    // with every line (the earlier, quadratic search) took about 100 times.
+    const ratio = timeFor(16000) / timeFor(1600);
+    assert.ok(ratio < 40, `ratio ${ratio.toFixed(1)}`);
+  });
+
   it('finds the line of a column behind lines of another one', () => {
     const lines = core.groupRectsIntoLines([
       rect(100, 120, 0, 200, 0),
@@ -671,6 +698,71 @@ describe('chooseSemanticRoot', () => {
       {textLength: 300, parent: -1},
       {textLength: 3000, parent: -1},
     ]), 1);
+  });
+});
+
+describe('probeEdges', () => {
+  const view = {top: 0, bottom: 800};
+
+  /**
+   * Probes a page with fixed elements and records the probed points.
+   * @param {!Array<!Object>} elements Boxes of the fixed elements, topmost
+   *     first.
+   * @param {!Array<number>=} xs
+   * @return {{boxes: !Array<!Object>, probes: !Array<!Array<number>>}}
+   */
+  function probe(elements, xs = [400]) {
+    const probes = [];
+    const boxes = core.probeEdges(view, xs, (x, y) => {
+      probes.push([x, y]);
+      return elements.find((box) => box.top <= y && y < box.bottom &&
+          box.left <= x && x < box.right) || null;
+    });
+    return {boxes, probes};
+  }
+
+  it('finds a header and a footer with few probes', () => {
+    const header = rect(0, 60, 0, 1000);
+    const footer = rect(740, 800, 0, 1000);
+    const {boxes, probes} = probe([header, footer]);
+    assert.deepEqual(boxes, [header, footer]);
+    // One row per element plus CONFIG.obstruction.freeRows free rows per
+    // edge, instead of a row every 16 px across 70 % of the view.
+    assert.equal(probes.length, 2 + 2 * core.config.obstruction.freeRows);
+  });
+
+  it('continues below a header in one step', () => {
+    const {probes} = probe([rect(0, 200, 0, 1000)]);
+    assert.deepEqual(probes[1], [400, 201]);
+  });
+
+  it('finds stacked bars, also across a small gap', () => {
+    const header = rect(0, 40, 0, 1000);
+    const subnav = rect(40, 80, 0, 1000);
+    const sticky = rect(110, 150, 0, 1000);
+    assert.deepEqual(probe([header, subnav, sticky]).boxes,
+        [header, subnav, sticky]);
+  });
+
+  it('probes every x of a row', () => {
+    const badge = rect(0, 40, 600, 700);
+    assert.deepEqual(probe([badge], [150, 400, 650]).boxes, [badge]);
+  });
+
+  it('stops at layout shells that cover most of the view', () => {
+    const {boxes, probes} = probe([rect(0, 800, 0, 1000)]);
+    assert.deepEqual(boxes, []);
+    assert.equal(probes.length, 2 * core.config.obstruction.freeRows);
+  });
+
+  it('stays within the probe share of the view', () => {
+    const {probes} = probe([rect(0, 100, 0, 1000), rect(100, 200, 0, 1000),
+      rect(200, 300, 0, 1000), rect(300, 400, 0, 1000)]);
+    const {topProbe} = core.config.obstruction;
+    for (const [, y] of probes) {
+      assert.ok(y < view.bottom * topProbe ||
+          y > view.bottom * (1 - core.config.obstruction.bottomProbe), `${y}`);
+    }
   });
 });
 

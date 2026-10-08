@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reading Ruler
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.2.2
+// @version      1.3.0
 // @description  Highlights one line of an article at a time: click or tap a line, then move with the arrow keys
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -215,14 +215,18 @@
     widgetShare: 0.6,
 
     // Search for fixed and sticky headers/footers that cover the viewport:
-    // probe points every probeStep px in the top and bottom share of the
-    // view. Elements must start within edgeShare of an edge and may cover at
-    // most maxHeightShare; if less than minBandShare remains uncovered, the
-    // whole view is used.
+    // rows of points are probed from each edge inwards, every probeStep px
+    // and past every element found, within the top and bottom share of the
+    // view; the scan of an edge stops after freeRows rows without one (a
+    // gap of up to 32 px between stacked bars is crossed).
+    // Elements must start within edgeShare of an edge and may cover at most
+    // maxHeightShare; if less than minBandShare remains uncovered, the whole
+    // view is used.
     obstruction: {
       probeStep: 16,
       topProbe: 0.4,
       bottomProbe: 0.3,
+      freeRows: 3,
       edgeShare: 0.2,
       maxHeightShare: 0.5,
       minBandShare: 0.3,
@@ -837,6 +841,55 @@
   }
 
   /**
+   * Finds fixed and sticky elements at the top and bottom edges of a view.
+   * Rows of points are probed from each edge inwards: a row continues past
+   * the elements it hits (a header needs one row, not one per probeStep),
+   * and the scan of an edge stops after CONFIG.obstruction.freeRows rows
+   * without such an element, or at the probe share of the view. Elements
+   * that cover more than maxHeightShare of the view (layout shells) do not
+   * count as hits.
+   * @param {!Band} view
+   * @param {!Array<number>} xs Horizontal positions of the probes in a row.
+   * @param {(x: number, y: number) => ?Box} hitAt Box of the fixed or stuck
+   *     element covering a point, null if there is none.
+   * @return {!Array<!Box>}
+   */
+  function probeEdges(view, xs, hitAt) {
+    const {probeStep, topProbe, bottomProbe, freeRows, maxHeightShare} =
+        CONFIG.obstruction;
+    const height = view.bottom - view.top;
+    /** @type {!Array<!Box>} */
+    const boxes = [];
+    /**
+     * @param {number} start
+     * @param {number} limit
+     * @param {number} direction 1 (downwards from the top edge) or -1.
+     */
+    const scan = (start, limit, direction) => {
+      let free = 0;
+      for (let y = start; direction > 0 ? y < limit : y > limit;) {
+        let next = y + direction * probeStep;
+        let hit = false;
+        for (const x of xs) {
+          const box = hitAt(x, y);
+          if (!box || box.bottom - box.top > height * maxHeightShare) continue;
+          hit = true;
+          boxes.push(box);
+          next = direction > 0 ?
+              Math.max(next, box.bottom + 1) :
+              Math.min(next, box.top - 1);
+        }
+        free = hit ? 0 : free + 1;
+        if (free >= freeRows) break;
+        y = next;
+      }
+    };
+    scan(view.top + 1, view.top + height * topProbe, 1);
+    scan(view.bottom - 2, view.bottom - height * bottomProbe, -1);
+    return boxes;
+  }
+
+  /**
    * Determines the part of a view not covered by fixed or sticky headers and
    * footers. Only elements that overlap the text column horizontally count.
    * @param {!Array<!Box>} boxes Fixed and sticky elements.
@@ -951,6 +1004,7 @@
     scoreContainer,
     pickBestCandidate,
     chooseSemanticRoot,
+    probeEdges,
     uncoveredBand,
     computeScrollTarget,
     withoutHash,
@@ -1077,6 +1131,11 @@
     '[role="radiogroup"]', '[role="combobox"]', '[role="spinbutton"]',
     '[role="scrollbar"]', '[role="textbox"]', '[role="searchbox"]',
     '[role="application"]', 'audio', 'video',
+  ].join(', ');
+  // Open dialogs, modal or not.
+  const DIALOG_SELECTOR = [
+    'dialog[open]', '[role="dialog"]', '[role="alertdialog"]',
+    '[aria-modal="true"]',
   ].join(', ');
   const MEDIA_TAGS = new Set(['img', 'picture', 'svg', 'video', 'canvas',
     'audio', 'iframe', 'object', 'embed']);
@@ -1958,6 +2017,16 @@
   // ===========================================================================
 
   /**
+   * @param {!Element} element
+   * @return {boolean} Whether the element scrolls its content vertically.
+   */
+  function isScrollable(element) {
+    const overflow = styleOf(element).overflowY;
+    return (overflow === 'auto' || overflow === 'scroll') &&
+        element.scrollHeight > element.clientHeight + 1;
+  }
+
+  /**
    * Scrollable ancestors of an element, innermost first, without the page.
    * @param {!Element} element
    * @return {!Array<!Element>}
@@ -1968,11 +2037,7 @@
       node && node !== document.documentElement &&
           node !== document.scrollingElement;
       node = node.parentElement) {
-      const overflow = styleOf(node).overflowY;
-      if ((overflow === 'auto' || overflow === 'scroll') &&
-          node.scrollHeight > node.clientHeight + 1) {
-        containers.push(node);
-      }
+      if (isScrollable(node)) containers.push(node);
     }
     return containers;
   }
@@ -2019,6 +2084,35 @@
   }
 
   /**
+   * Finds the fixed or stuck sticky element that covers a point: the
+   * topmost element there or its nearest such ancestor. An element covered
+   * by another one hides nothing.
+   * @param {number} x
+   * @param {number} y
+   * @param {!Band} view
+   * @return {?Box}
+   */
+  function pinnedBoxAt(x, y, view) {
+    const host = state.ui ? state.ui.host : null;
+    let element = document.elementFromPoint(x, y);
+    if (host && element === host) {
+      // The touch controls are on top: look below them.
+      element = document.elementsFromPoint(x, y)
+          .find((candidate) => candidate !== host) || null;
+    }
+    for (; element && element !== document.documentElement;
+      element = element.parentElement) {
+      const style = styleOf(element);
+      if (style.position !== 'fixed' && style.position !== 'sticky') continue;
+      const rect = element.getBoundingClientRect();
+      if (style.position === 'fixed' || isStuck(rect, style, view)) {
+        return rect;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Finds fixed and stuck sticky elements near the top and bottom of a view
    * by probing points along the text column.
    * @param {!Band} view
@@ -2026,41 +2120,10 @@
    * @return {!Array<!Box>}
    */
   function findObstructions(view, column) {
-    const {probeStep, topProbe, bottomProbe} = CONFIG.obstruction;
-    const height = view.bottom - view.top;
     const maxX = document.documentElement.clientWidth - 2;
     const xs = [column.left + 8, (column.left + column.right) / 2,
       column.right - 8].map((x) => clamp(x, 1, maxX));
-    const ys = [];
-    for (let y = view.top + 1; y < view.top + height * topProbe;
-      y += probeStep) {
-      ys.push(y);
-    }
-    for (let y = view.bottom - 2; y > view.bottom - height * bottomProbe;
-      y -= probeStep) {
-      ys.push(y);
-    }
-    const seen = new Set();
-    /** @type {!Array<!Box>} */
-    const boxes = [];
-    for (const x of xs) {
-      for (const y of ys) {
-        for (const element of document.elementsFromPoint(x, y)) {
-          if (seen.has(element)) continue;
-          seen.add(element);
-          if (state.ui && element === state.ui.host) continue;
-          const style = styleOf(element);
-          if (style.position !== 'fixed' && style.position !== 'sticky') {
-            continue;
-          }
-          const rect = element.getBoundingClientRect();
-          if (style.position === 'fixed' || isStuck(rect, style, view)) {
-            boxes.push(rect);
-          }
-        }
-      }
-    }
-    return boxes;
+    return probeEdges(view, xs, (x, y) => pinnedBoxAt(x, y, view));
   }
 
   /**
@@ -2327,7 +2390,7 @@
     const {resizeObserver, mutationObserver} = state;
     if (!resizeObserver || !mutationObserver) return;
     const root = contentRoot(false) || document.body;
-    if (root && root !== state.observedRoot) {
+    if (root !== state.observedRoot) {
       mutationObserver.disconnect();
       mutationObserver.observe(root,
           {childList: true, subtree: true, characterData: true});
@@ -2440,9 +2503,22 @@
   }
 
   /**
+   * @param {!Element} element
+   * @return {?Element} The element or its nearest ancestor that scrolls
+   *     vertically; the arrow keys scroll it while the element has focus.
+   */
+  function scrollRegionOf(element) {
+    if (isScrollable(element)) return element;
+    return scrollContainersOf(element)[0] || null;
+  }
+
+  /**
+   * Whether the keys belong to the focused element: an editable field, a
+   * widget that uses the arrow keys itself, or a dialog or scroll region
+   * the reader moved the focus to, away from the selected line (a modal
+   * dialog in front of the text, a code block to scroll).
    * @param {!KeyboardEvent} event
-   * @return {boolean} Whether the focus is in an editable field or a widget
-   *     that uses the arrow keys itself.
+   * @return {boolean}
    */
   function isFocusInControl(event) {
     let active = document.activeElement;
@@ -2450,6 +2526,7 @@
       active = active.shadowRoot.activeElement;
     }
     const origin = event.composedPath()[0];
+    const selected = state.anchor ? state.anchor.node : null;
     for (const node of [active, origin]) {
       if (!(node instanceof Element)) continue;
       if (['input', 'textarea', 'select'].includes(node.localName) ||
@@ -2457,13 +2534,18 @@
           node.closest(ARROW_WIDGET_SELECTOR)) {
         return true;
       }
+      for (const region of [node.closest(DIALOG_SELECTOR),
+        scrollRegionOf(node)]) {
+        if (region && !(selected && region.contains(selected))) return true;
+      }
     }
     return false;
   }
 
   /**
    * Arrow keys move the selection, Escape clears it (and still reaches the
-   * page, e.g. to close a dialog).
+   * page). Both are left to the page while the focus is in a control (see
+   * isFocusInControl).
    * @param {!KeyboardEvent} event
    */
   function onKeyDown(event) {
@@ -2473,6 +2555,8 @@
     }
     const key = event.key;
     if (key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'Escape') return;
+    // Styles may have changed since the last operation.
+    beginOperation();
     if (isFocusInControl(event)) return;
     if (key === 'Escape') {
       clearSelection();
@@ -2490,7 +2574,8 @@
   // Per-site switch and startup
   // ===========================================================================
 
-  const SITE = location.hostname || location.protocol;
+  // @match *://*/* covers http and https pages, which always have a host.
+  const SITE = location.hostname;
 
   /**
    * Attaches or detaches the input listeners.

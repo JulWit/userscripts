@@ -287,6 +287,92 @@ describe('article page', () => {
         await page.keyboard.press('Escape');
         assert.equal(await ruler(page), null);
       }));
+
+  it('probes few points for fixed headers and still finds them', () =>
+    withPage('article.html', async (page) => {
+      await clickWord(page, '#indented', 'aliquip');
+      const cost = await moveCost(page, 6);
+      // Probing every 16 px across 70 % of the view took about 100.
+      assert.ok(cost.probes <= 30, `${cost.probes} probes per key`);
+      // The line is centered below the fixed header (48 px), not in the
+      // whole view.
+      await page.keyboard.press('ArrowDown');
+      const box = await ruler(page);
+      const center = await page.evaluate((box) =>
+        (box.top + box.bottom) / 2 - window.scrollY, box);
+      const band = (48 + 700) / 2;
+      assert.ok(Math.abs(center - band) < Math.abs(center - 700 / 2),
+          `line center ${center}`);
+    }));
+});
+
+describe('focus outside the selected text', () => {
+  /**
+   * Waits until an element has scrolled (keyboard scrolling may be smooth).
+   * @param {!import('playwright').Page} page
+   * @param {string} id
+   * @return {!Promise<void>}
+   */
+  async function waitForScroll(page, id) {
+    await page.waitForFunction(
+        (id) => document.getElementById(id).scrollTop > 0, id,
+        {timeout: 2000});
+  }
+
+  it('leaves the arrow keys and Escape to a modal dialog', () => withPage(
+      'focus.html', async (page) => {
+        await clickWord(page, '#intro', 'clauses');
+        const start = await ruler(page);
+        await page.evaluate(() => {
+          document.getElementById('dialog').showModal();
+          document.getElementById('options').focus();
+        });
+        await page.keyboard.press('ArrowDown');
+        await page.keyboard.press('ArrowDown');
+        assertSameBox(await ruler(page), start);
+        await waitForScroll(page, 'options');
+
+        await page.keyboard.press('Escape');
+        assert.equal(await page.evaluate(() =>
+          document.getElementById('dialog').open), false);
+        assertSameBox(await ruler(page), start);
+        // Back in the text, the arrow keys move the line again.
+        await page.keyboard.press('ArrowDown');
+        assert.ok((await ruler(page)).top > start.top);
+      }));
+
+  it('leaves the arrow keys to a focused scroll region', () => withPage(
+      'focus.html', async (page) => {
+        await clickWord(page, '#intro', 'clauses');
+        const start = await ruler(page);
+        await page.focus('#code');
+        await page.keyboard.press('ArrowDown');
+        assertSameBox(await ruler(page), start);
+        await waitForScroll(page, 'code');
+      }));
+
+  it('moves through a focused scroll region that holds the line', () =>
+    withPage('focus.html', async (page) => {
+      // The click focuses the code block (it has a tabindex).
+      await clickWord(page, '#code', 'line1');
+      assert.equal(
+          await page.evaluate(() => document.activeElement.id), 'code');
+      const start = await ruler(page);
+      await page.keyboard.press('ArrowDown');
+      const next = await ruler(page);
+      assert.ok(next && Math.abs(next.top - start.top - 24) < 1,
+          `${start.top} → ${next && next.top}`);
+    }));
+
+  it('moves through a dialog that holds the text', () => withPage(
+      'overlay.html', async (page) => {
+        await clickWord(page, '#first', 'clauses');
+        assert.equal(
+            await page.evaluate(() => document.activeElement.id), 'overlay');
+        const start = await ruler(page);
+        await page.keyboard.press('ArrowDown');
+        assert.ok((await ruler(page)).top > start.top);
+      }));
 });
 
 /**
@@ -375,24 +461,62 @@ async function assertLineByLine(page, key, presses, lineHeight) {
 }
 
 /**
- * Time the script takes per arrow key, measured inside the page, so that
- * the round trips of the test driver do not count. The key events are
- * dispatched by the page; the script does not require trusted key events.
+ * Work the script does per arrow key, measured inside the page, so that the
+ * round trips of the test driver do not count: the expensive layout calls
+ * (text measurements, hit tests for fixed headers) and the time. The calls
+ * do not depend on the machine; the time only serves as a generous safety
+ * net. The key events are dispatched by the page; the script does not
+ * require trusted key events.
  * @param {!import('playwright').Page} page
  * @param {number} presses
- * @return {!Promise<number>} Median in ms.
+ * @return {!Promise<{rects: number, probes: number, ms: number}>} Medians
+ *     per key: Range.getClientRects calls, elementFromPoint and
+ *     elementsFromPoint calls, and milliseconds.
  */
-function medianMoveTime(page, presses) {
+function moveCost(page, presses) {
   return page.evaluate((presses) => {
-    const times = [];
-    for (let step = 0; step < presses; step++) {
-      const start = performance.now();
-      document.body.dispatchEvent(new KeyboardEvent('keydown',
-          {key: 'ArrowDown', bubbles: true, cancelable: true}));
-      times.push(performance.now() - start);
+    const counts = {rects: 0, probes: 0};
+    /**
+     * Counts the calls of a method until the returned function restores it.
+     * @param {!Object} proto
+     * @param {string} name
+     * @param {string} counter
+     * @return {function(): void}
+     */
+    const count = (proto, name, counter) => {
+      const original = proto[name];
+      proto[name] = function(...args) {
+        counts[counter]++;
+        return original.apply(this, args);
+      };
+      return () => {
+        proto[name] = original;
+      };
+    };
+    const restore = [
+      count(Range.prototype, 'getClientRects', 'rects'),
+      count(Document.prototype, 'elementFromPoint', 'probes'),
+      count(Document.prototype, 'elementsFromPoint', 'probes'),
+    ];
+    const samples = [];
+    try {
+      for (let step = 0; step < presses; step++) {
+        const before = {...counts};
+        const start = performance.now();
+        document.body.dispatchEvent(new KeyboardEvent('keydown',
+            {key: 'ArrowDown', bubbles: true, cancelable: true}));
+        samples.push({
+          ms: performance.now() - start,
+          rects: counts.rects - before.rects,
+          probes: counts.probes - before.probes,
+        });
+      }
+    } finally {
+      restore.forEach((undo) => undo());
     }
-    times.sort((a, b) => a - b);
-    return times[Math.floor(times.length / 2)];
+    const median = (key) => samples.map((sample) => sample[key])
+        .sort((a, b) => a - b)[Math.floor(samples.length / 2)];
+    return {rects: median('rects'), probes: median('probes'), ms: median('ms')};
   }, presses);
 }
 
@@ -409,9 +533,11 @@ describe('long code block', () => {
   it('moves quickly in a block with thousands of text nodes', () => withPage(
       'code.html', async (page) => {
         await clickWord(page, '#code', 'value0');
-        // Measuring the whole block took about 100 ms per key.
-        const median = await medianMoveTime(page, 40);
-        assert.ok(median < 40, `median ${median} ms`);
+        // Measuring the whole block measured its 12000 text nodes per key
+        // (about 100 ms); a window has at most 3 × CONFIG.maxSegmentTexts.
+        const cost = await moveCost(page, 40);
+        assert.ok(cost.rects < 1000, `${cost.rects} text measurements`);
+        assert.ok(cost.ms < 200, `median ${cost.ms} ms`);
       }));
 
   it('moves line by line and quickly in a single long text node',
@@ -419,9 +545,12 @@ describe('long code block', () => {
         await clickWord(page, '#code', 'value10 ');
         await assertLineByLine(page, 'ArrowDown', 20, 24);
         await assertLineByLine(page, 'ArrowUp', 20, 24);
-        // Grouping thousands of rects took about 30 ms per key.
-        const median = await medianMoveTime(page, 40);
-        assert.ok(median < 25, `median ${median} ms`);
+        // The node yields thousands of rects; grouping them in linear time
+        // is covered by the unit tests (groupRectsIntoLines).
+        const cost = await moveCost(page, 40);
+        assert.ok(cost.rects < 100, `${cost.rects} text measurements`);
+        assert.ok(cost.probes <= 30, `${cost.probes} probes`);
+        assert.ok(cost.ms < 200, `median ${cost.ms} ms`);
       }));
 });
 
