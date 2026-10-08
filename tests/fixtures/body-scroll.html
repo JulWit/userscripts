@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: overflow of the body</title>
+<style>
+  /* As on some news sites: the body is as high as the viewport and sets
+     overflow-y: auto. The root element's overflow is visible, so the body
+     passes its overflow on to the viewport: the page scrolls, not the
+     body. */
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 16px/24px monospace;
+    margin: 0;
+    overflow-y: auto;
+  }
+
+  main {
+    margin: 16px auto;
+    width: 600px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <article id="story"></article>
+</main>
+<script>
+  // Text for several screens.
+  const story = document.getElementById('story');
+  for (let index = 0; index < 30; index++) {
+    const paragraph = document.createElement('p');
+    paragraph.textContent = `Paragraph ${index} of the story, with commas, ` +
+        'clauses, and enough words to wrap onto a second line of the column.';
+    story.append(paragraph);
+  }
+</script>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

@@ -425,6 +425,48 @@ describe('touch controls', () => {
       }));
 });
 
+describe('text between nested blocks', () => {
+  it('selects text in a div with line breaks and a figure', () => withPage(
+      'loose-text.html', async (page) => {
+        const word = await clickWord(page, '#story', 'legend');
+        assert.ok(covers(await ruler(page), word));
+      }));
+
+  it('moves past the figure to the text after it', () => withPage(
+      'loose-text.html', async (page) => {
+        await clickWord(page, '#story', 'legend');
+        const target =
+            await page.evaluate(() => wordPoint('#story', 'Toronto'));
+        let reached = false;
+        for (let step = 0; step < 10 && !reached; step++) {
+          await page.keyboard.press('ArrowDown');
+          reached = covers(await ruler(page), target);
+        }
+        assert.ok(reached);
+      }));
+});
+
+describe('body that passes its overflow to the viewport', () => {
+  it('scrolls the page to keep the line in view', () => withPage(
+      'body-scroll.html', async (page) => {
+        await clickWord(page, '#story', 'Paragraph');
+        for (let step = 0; step < 30; step++) {
+          await page.keyboard.press('ArrowDown');
+          const state = await page.evaluate(() => {
+            const box = rulerBox();
+            return {
+              top: box.top - window.scrollY,
+              bottom: box.bottom - window.scrollY,
+              height: window.innerHeight,
+            };
+          });
+          assert.ok(state.top >= 0 && state.bottom <= state.height,
+              `step ${step}: ${state.top}-${state.bottom}`);
+        }
+        assert.ok(await page.evaluate(() => window.scrollY) > 0);
+      }));
+});
+
 describe('page without an article', () => {
   it('leaves clicks on text alone', () => withPage('webapp.html',
       async (page) => {

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: text between nested blocks</title>
+<style>
+  body {
+    background: #fff;
+    color: #000;
+    color-scheme: light;
+    font: 16px/24px monospace;
+    margin: 0;
+  }
+
+  .layout {
+    margin: 16px auto;
+    width: 700px;
+  }
+
+  .badge {
+    background: #ccc;
+    float: left;
+    height: 72px;
+    margin: 0 10px 10px 0;
+    width: 72px;
+  }
+
+  .figure {
+    background: #ddd;
+    height: 96px;
+    margin: 0;
+  }
+
+  .about {
+    border-top: 1px solid #ccc;
+    margin-top: 32px;
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <!-- As on some news sites: the story is text directly in a div, broken
+       into paragraphs with <br>, around a few blocks (a figure, a badge).
+       The div is not a paragraph itself, as it contains blocks. -->
+  <article class="full">
+    <h1>Old graphics cards learn new tricks</h1>
+    <div class="author">Written by <a href="#">A. Writer</a> on 3 October</div>
+    <div class="content" id="story">
+      <div class="badge"></div>
+      Over the past year, a driver developer has made several improvements to
+      the kernel driver for old graphics cards, so that they handle games and
+      other tasks better. This week, at a conference in a large city, she
+      presented this work, which she began as an exercise.
+      <br>
+      <br>She has become a legend for owners of old graphics cards, moving
+      them from the legacy driver to the modern one, which unlocks a newer
+      graphics API, better performance, and better functionality overall. In
+      the process, she fixed defects in the display code and in the power
+      management of these cards.
+      <br><p class="figure"></p>
+      <br>For those wishing to hear the whole story, a recording of the talk
+      is available, along with the <a href="#">slides</a>, and the talk also
+      covers how to get involved in driver development in Toronto and
+      elsewhere.
+    </div>
+  </article>
+  <!-- A competing container with real paragraphs, but less text. -->
+  <div class="about">
+    <p>The writer of this article is the principal author of the site, which
+      was founded many years ago, with a focus on hardware, drivers, and
+      the experience of running them, and has written thousands of
+      articles.</p>
+    <p>The writer can be followed on social networks, and the site accepts
+      support from its readers, with subscriptions, donations, and tips,
+      which keep the articles coming without too many advertisements.</p>
+  </div>
+</div>
+<script src="harness.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>

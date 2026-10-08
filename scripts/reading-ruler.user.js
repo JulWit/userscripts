@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reading Ruler
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.3.0
+// @version      1.3.1
 // @description  Highlights one line of an article at a time: click or tap a line, then move with the arrow keys
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -147,9 +147,10 @@
       'dt', 'dd'],
     headingTags: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
     // Elements that may hold body text without paragraphs. For the content
-    // detection they count as paragraphs only if they contain no block and
-    // break their text with <br> (or are <pre>): table cells and divs of web
-    // apps hold text too, but not prose.
+    // detection they count as paragraphs only if they break their text with
+    // <br> (or are <pre>): table cells and divs of web apps hold text too,
+    // but not prose. If they also contain blocks, each run of their own text
+    // between those blocks counts as a paragraph.
     textContainerTags: ['div', 'section', 'td', 'pre', 'figcaption'],
     // Text outside every block tag belongs to its nearest ancestor with one
     // of these computed display values.
@@ -1341,17 +1342,80 @@
   // ===========================================================================
 
   /**
-   * Paragraph-like elements below a container without nested ones: the
-   * actual paragraphs, list items, headings, and text containers that break
-   * their text into lines (see countsAsParagraph).
-   * @param {!Element} container
-   * @return {!Array<!Element>}
+   * Text directly inside a text container, outside its nested
+   * paragraph-like elements: split at those elements into runs, like the
+   * paragraphs Readability wraps such text in. Excluded children and runs
+   * that consist mostly of links are left out.
+   * @param {!Element} element
+   * @return {!Array<string>} Runs with collapsed white space.
    */
-  function leafBlocks(container) {
-    return [...container.querySelectorAll(PARAGRAPH_SELECTOR)].filter(
-        (block) => !block.querySelector(PARAGRAPH_SELECTOR) &&
-            countsAsParagraph(block.localName,
-                !!block.querySelector(':scope > br')));
+  function looseTextRuns(element) {
+    /** @type {!Array<string>} */
+    const runs = [];
+    /** @type {!Array<string>} */
+    let parts = [];
+    let linkLength = 0;
+    const flush = () => {
+      const text = parts.join(' ').replace(/\s+/g, ' ').trim();
+      if (text && linkLength / text.length <= CONFIG.maxLinkDensity) {
+        runs.push(text);
+      }
+      parts = [];
+      linkLength = 0;
+    };
+    for (const child of element.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        parts.push(/** @type {!Text} */ (child).data);
+      } else if (child instanceof Element) {
+        if (child.matches(PARAGRAPH_SELECTOR) ||
+            child.querySelector(PARAGRAPH_SELECTOR)) {
+          flush();
+        } else if (!exclusionOf(child)) {
+          parts.push(child.textContent || '');
+          const links = child.localName === 'a' ?
+              [child] :
+              child.querySelectorAll('a');
+          for (const link of links) linkLength += normalizedText(link).length;
+        }
+      }
+    }
+    flush();
+    return runs;
+  }
+
+  /**
+   * Paragraphs below a container for the content detection: paragraph-like
+   * elements without nested ones (paragraphs, list items, headings, and
+   * text containers that break their text into lines, see
+   * countsAsParagraph), and the runs of text that a text container with
+   * nested ones breaks into lines next to them (looseTextRuns). Paragraphs
+   * outside the body text and link-heavy ones are left out.
+   * @param {!Element} container
+   * @return {!Array<{text: string, parent: ?Element}>} parent is the first
+   *     element whose score the paragraph raises.
+   */
+  function paragraphsIn(container) {
+    /** @type {!Array<{text: string, parent: ?Element}>} */
+    const paragraphs = [];
+    for (const element of container.querySelectorAll(PARAGRAPH_SELECTOR)) {
+      const hasLineBreak = !!element.querySelector(':scope > br');
+      const nested = !!element.querySelector(PARAGRAPH_SELECTOR);
+      const counts = nested ?
+          hasLineBreak && CONFIG.textContainerTags.includes(element.localName) :
+          countsAsParagraph(element.localName, hasLineBreak);
+      if (!counts || !isIncluded(element, container)) continue;
+      if (nested) {
+        for (const text of looseTextRuns(element)) {
+          paragraphs.push({text, parent: element});
+        }
+      } else if (!isLinkHeavy(element)) {
+        paragraphs.push({
+          text: normalizedText(element),
+          parent: element.parentElement,
+        });
+      }
+    }
+    return paragraphs;
   }
 
   /**
@@ -1382,10 +1446,8 @@
     /** @type {!Array<!SemanticCandidate>} */
     const candidates = elements.map((element) => {
       let textLength = 0;
-      for (const block of leafBlocks(element)) {
-        if (isIncluded(block, element) && !isLinkHeavy(block)) {
-          textLength += normalizedText(block).length;
-        }
+      for (const paragraph of paragraphsIn(element)) {
+        textLength += paragraph.text.length;
       }
       let ancestor = element.parentElement?.closest(SEMANTIC_SELECTOR);
       while (ancestor && !indices.has(ancestor)) {
@@ -1406,11 +1468,9 @@
     const body = /** @type {!HTMLElement} */ (document.body);
     /** @type {!Map<!Element, !ContainerFeatures>} */
     const features = new Map();
-    for (const block of leafBlocks(body)) {
-      if (!isIncluded(block, body) || isLinkHeavy(block)) continue;
-      const text = normalizedText(block);
+    for (const {text, parent} of paragraphsIn(body)) {
       if (text.length < CONFIG.scoring.minParagraphLength) continue;
-      let ancestor = block.parentElement;
+      let ancestor = parent;
       for (let depth = 0; ancestor && ancestor !== document.documentElement &&
         depth < CONFIG.scoring.maxDepth; depth++) {
         let entry = features.get(ancestor);
@@ -2017,10 +2077,25 @@
   // ===========================================================================
 
   /**
+   * Whether an element passes its overflow on to the viewport: the body
+   * does while the root element's overflow is visible (CSS Overflow 3). Its
+   * computed overflow-y may then be auto, but the page scrolls, not the
+   * body.
+   * @param {!Element} element
+   * @return {boolean}
+   */
+  function propagatesOverflow(element) {
+    if (element !== document.body) return false;
+    const root = styleOf(document.documentElement);
+    return root.overflowX === 'visible' && root.overflowY === 'visible';
+  }
+
+  /**
    * @param {!Element} element
    * @return {boolean} Whether the element scrolls its content vertically.
    */
   function isScrollable(element) {
+    if (propagatesOverflow(element)) return false;
     const overflow = styleOf(element).overflowY;
     return (overflow === 'auto' || overflow === 'scroll') &&
         element.scrollHeight > element.clientHeight + 1;
