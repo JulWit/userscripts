@@ -6,8 +6,12 @@
 
 'use strict';
 
-/** @type {!Map<string, *>} */
-const harnessValues = new Map();
+/**
+ * Stored values. Tests can preset them by defining window.harnessPreset (an
+ * object) in an init script, before the page loads.
+ * @type {!Map<string, *>}
+ */
+const harnessValues = new Map(Object.entries(window.harnessPreset || {}));
 
 /**
  * @param {string} key
@@ -24,6 +28,16 @@ function GM_getValue(key, fallback) {
  */
 function GM_setValue(key, value) {
   harnessValues.set(key, value);
+}
+
+/** @param {string} key */
+function GM_deleteValue(key) {
+  harnessValues.delete(key);
+}
+
+/** @return {!Array<string>} */
+function GM_listValues() {
+  return [...harnessValues.keys()];
 }
 
 /** @type {!Array<{key: string, callback: !Function}>} */

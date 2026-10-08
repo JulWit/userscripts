@@ -95,58 +95,100 @@ describe('currency patterns', () => {
     assert.ok(patterns.PLN.test('12,99 zł'));
   });
 
-  it('only accepts the store currency', () => {
-    const store = patterns[core.text.currencyCode];
-    assert.ok(store.test('25,59€'));
-    assert.ok(!store.test('$12.99'));
+  it('only accepts the given currency', () => {
+    const euro = core.currencyPattern('EUR');
+    assert.ok(euro.test('25,59€'));
+    assert.ok(!euro.test('$12.99'));
+  });
+
+  it('does not take other dollar currencies or titles for USD', () => {
+    const usd = core.currencyPattern('USD');
+    assert.ok(usd.test('$12.99'));
+    assert.ok(usd.test('12.99 USD'));
+    for (const text of ['CDN$ 12.99', 'A$ 12.99', 'R$ 12,99', 'Ca$h']) {
+      assert.ok(!usd.test(text), text);
+    }
+  });
+
+  it('rejects unsupported currencies', () => {
+    assert.equal(core.isSupportedCurrency('EUR'), true);
+    assert.equal(core.isSupportedCurrency('JPY'), false);
+    assert.equal(core.isSupportedCurrency('toString'), false);
+    assert.throws(() => core.currencyPattern('JPY'));
+  });
+});
+
+describe('detectCurrency', () => {
+  it('picks the currency most prices show', () => {
+    assert.equal(
+        core.detectCurrency(['19,99€', '9,99€', '$5.00', 'Add to cart']),
+        'EUR');
+    assert.equal(core.detectCurrency(['$12.99', '-20%', '$10.39']), 'USD');
+    assert.equal(core.detectCurrency(['12,99zł']), 'PLN');
+  });
+
+  it('ignores texts without a number or with several currencies', () => {
+    assert.equal(core.detectCurrency(['€', 'Prices in EUR']), null);
+    assert.equal(core.detectCurrency(['12 € / $13']), null);
+    assert.equal(core.detectCurrency([]), null);
   });
 });
 
 describe('parsePriceLabel', () => {
   it('reads discount, original and final price', () => {
-    assert.deepEqual(
-        core.parsePriceLabel('20% off. Regular price €31.99, now €25.59.'),
-        {discount: 20, original: 31.99, final: 25.59, free: false});
+    assert.deepEqual(core.parsePriceLabel(
+        '20% off. Regular price €31.99, now €25.59.', 'EUR'),
+    {discount: 20, original: 31.99, final: 25.59, free: false});
   });
 
   it('reads German labels', () => {
-    assert.deepEqual(
-        core.parsePriceLabel('-75 % Rabatt. Normalpreis 39,99€, jetzt 9,99€'),
-        {discount: 75, original: 39.99, final: 9.99, free: false});
+    assert.deepEqual(core.parsePriceLabel(
+        '-75 % Rabatt. Normalpreis 39,99€, jetzt 9,99€', 'EUR'),
+    {discount: 75, original: 39.99, final: 9.99, free: false});
+  });
+
+  it('reads labels in other currencies', () => {
+    assert.deepEqual(core.parsePriceLabel(
+        '20% off. Was $31.99, now $25.59.', 'USD'),
+    {discount: 20, original: 31.99, final: 25.59, free: false});
   });
 
   it('ignores labels without the store currency or discount', () => {
-    assert.equal(core.parsePriceLabel('20% off. Was $31.99, now $25.59.'),
-        null);
-    assert.equal(core.parsePriceLabel('Regular price €31.99'), null);
-    assert.equal(core.parsePriceLabel(null), null);
+    assert.equal(core.parsePriceLabel(
+        '20% off. Was $31.99, now $25.59.', 'EUR'), null);
+    assert.equal(core.parsePriceLabel('Regular price €31.99', 'EUR'), null);
+    assert.equal(core.parsePriceLabel(null, 'EUR'), null);
   });
 });
 
 describe('parsePriceTexts', () => {
   it('reads a discounted price', () => {
-    assert.deepEqual(core.parsePriceTexts(['-20%', '31,99€', '25,59€']),
+    assert.deepEqual(
+        core.parsePriceTexts(['-20%', '31,99€', '25,59€'], 'EUR'),
         {discount: 20, original: 31.99, final: 25.59, free: false});
   });
 
   it('reads a regular price', () => {
-    assert.deepEqual(core.parsePriceTexts(['19,50€']),
+    assert.deepEqual(core.parsePriceTexts(['19,50€'], 'EUR'),
         {discount: 0, original: 19.5, final: 19.5, free: false});
   });
 
   it('derives the discount when it is not shown', () => {
-    assert.equal(core.parsePriceTexts(['20,00€', '15,00€']).discount, 25);
+    assert.equal(
+        core.parsePriceTexts(['20,00€', '15,00€'], 'EUR').discount, 25);
   });
 
   it('recognizes free games', () => {
-    assert.deepEqual(core.parsePriceTexts(['Free to Play']),
+    assert.deepEqual(core.parsePriceTexts(['Free to Play'], 'EUR'),
         {discount: 0, original: 0, final: 0, free: true});
-    assert.equal(core.parsePriceTexts(['Kostenlos spielbar']).free, true);
+    assert.equal(
+        core.parsePriceTexts(['Kostenlos spielbar'], 'EUR').free, true);
   });
 
   it('ignores other currencies and unrelated texts', () => {
-    assert.equal(core.parsePriceTexts(['$12.99']), null);
-    assert.equal(core.parsePriceTexts(['Add to cart', '']), null);
+    assert.equal(core.parsePriceTexts(['$12.99'], 'EUR'), null);
+    assert.equal(core.parsePriceTexts(['Add to cart', ''], 'EUR'), null);
+    assert.equal(core.parsePriceTexts(['$12.99'], 'USD').final, 12.99);
   });
 });
 
@@ -180,6 +222,80 @@ describe('combineHistograms', () => {
         core.combineHistograms([hist(10, 2, 1, 0), hist(5, 3, 0, 2)]),
         hist(15, 5, 1, 2));
     assert.deepEqual(core.combineHistograms([]), hist(0, 0));
+  });
+});
+
+describe('readCacheEntry', () => {
+  const now = 1_000_000_000;
+  const ttl = 1000;
+
+  it('returns the histogram and its load time', () => {
+    assert.deepEqual(
+        core.readCacheEntry({...hist(10, 2, 1, 0), t: now - 10}, now, ttl),
+        {hist: hist(10, 2, 1, 0), t: now - 10});
+  });
+
+  it('rejects expired entries and entries from the future', () => {
+    assert.equal(
+        core.readCacheEntry({...hist(1, 1), t: now - ttl}, now, ttl), null);
+    assert.equal(
+        core.readCacheEntry({...hist(1, 1), t: now + 1}, now, ttl), null);
+  });
+
+  it('rejects malformed entries', () => {
+    const valid = {...hist(10, 2, 1, 0), t: now};
+    for (const entry of [
+      null,
+      'hist',
+      {...valid, t: String(now)},
+      {...valid, upTotal: undefined},
+      {...valid, downTotal: '2'},
+      {...valid, up30: -1},
+      {...valid, down30: NaN},
+    ]) {
+      assert.equal(core.readCacheEntry(entry, now, ttl), null,
+          JSON.stringify(entry));
+    }
+  });
+});
+
+describe('combineExtras', () => {
+  const ok = (h, t) => ({state: 'ok', hist: h, t});
+
+  it('passes a single game through', () => {
+    const extra = ok(hist(1, 0), 5);
+    assert.equal(core.combineExtras([extra]), extra);
+  });
+
+  it('fails without games', () => {
+    assert.equal(core.combineExtras([]).state, 'failed');
+  });
+
+  it('waits while a game is pending', () => {
+    assert.equal(core.combineExtras(
+        [ok(hist(1, 0), 1), {state: 'pending', hist: null, t: 0}]).state,
+    'pending');
+  });
+
+  it('adds up the loaded games and counts the missing ones', () => {
+    const combined = core.combineExtras([
+      ok(hist(10, 2), 1),
+      {state: 'failed', hist: null, t: 2},
+      ok(hist(5, 3), 3),
+    ]);
+    assert.deepEqual(combined, {
+      state: 'ok',
+      hist: hist(15, 5),
+      t: '1,3',
+      missing: 1,
+    });
+  });
+
+  it('fails when no game was loaded', () => {
+    assert.equal(core.combineExtras([
+      {state: 'failed', hist: null, t: 1},
+      {state: 'failed', hist: null, t: 2},
+    ]).state, 'failed');
   });
 });
 
@@ -289,9 +405,27 @@ describe('buildTooltip', () => {
     assert.ok(content.notes.some((note) => note.includes('2 included')));
   });
 
-  it('explains a missing price', () => {
-    const content = core.buildTooltip({status: 'noPrice'}, 'ok');
-    assert.match(content.notes[0], /not in EUR/);
+  it('explains a missing price in the store currency', () => {
+    const content =
+        core.buildTooltip({status: 'noPrice'}, 'unused', {currency: 'GBP'});
+    assert.match(content.notes[0], /not in GBP/);
+  });
+
+  it('formats the price in the store currency', () => {
+    const result =
+        core.computeScore({price: price(0, 12.5)}, hist(9, 1), settings);
+    const priceRow = (currency) => core.buildTooltip(result, 'ok', {currency})
+        .rows.find((row) => row.label === 'Price').value;
+    assert.equal(priceRow('EUR'), '€12.50');
+    assert.equal(priceRow('USD'), '$12.50');
+  });
+
+  it('marks components without data', () => {
+    const result = core.computeScore({price: price(10, 9)}, null, settings);
+    const content = core.buildTooltip(result, 'failed');
+    const overall = content.rows.find((row) => row.label === 'Overall rating');
+    assert.equal(overall.points, '–');
+    assert.ok(content.notes.some((note) => note.includes('unavailable')));
   });
 });
 
@@ -327,5 +461,99 @@ describe('sanitizeSettings', () => {
     assert.equal(result.weights.price, defaults.weights.price);
     assert.equal(result.fetchExtra, defaults.fetchExtra);
     assert.equal(result.qualityPenalty, false);
+  });
+
+  it('does not take booleans or arrays for numbers', () => {
+    const result = core.sanitizeSettings(
+        {weights: {overall: true, recent: []}, referencePrice: false});
+    const defaults = core.defaultSettings();
+    assert.equal(result.weights.overall, defaults.weights.overall);
+    assert.equal(result.weights.recent, defaults.weights.recent);
+    assert.equal(result.referencePrice, defaults.referencePrice);
+  });
+
+  it('accepts automatic and supported currencies only', () => {
+    assert.equal(core.defaultSettings().currency, 'auto');
+    assert.equal(core.sanitizeSettings({currency: 'USD'}).currency, 'USD');
+    assert.equal(core.sanitizeSettings({currency: 'auto'}).currency, 'auto');
+    assert.equal(core.sanitizeSettings({currency: 'JPY'}).currency, 'auto');
+    assert.equal(core.sanitizeSettings({currency: 3}).currency, 'auto');
+  });
+});
+
+describe('TopList', () => {
+  /**
+   * @param {string} key
+   * @param {number} score
+   * @param {?number=} position
+   * @return {!Object} TopEntry.
+   */
+  function entry(key, score, position = null) {
+    return {
+      key,
+      appid: key,
+      title: `Game ${key}`,
+      price: price(50, 10),
+      hist: hist(900, 100),
+      score,
+      version: 0,
+      position,
+    };
+  }
+
+  it('ranks by score, then by title', () => {
+    const list = new core.TopList();
+    list.set(entry('b', 70));
+    list.set(entry('a', 70));
+    list.set(entry('c', 90));
+    list.set(entry('d', 10));
+    assert.deepEqual(list.ranked(3).map((e) => e.key), ['c', 'a', 'b']);
+    assert.equal(list.size, 4);
+  });
+
+  it('drops an entry whose position is taken by another one', () => {
+    const list = new core.TopList();
+    list.notePosition('a', 0);
+    list.set(entry('a', 80, 0));
+    assert.equal(list.notePosition('a', 0), false);
+    assert.equal(list.notePosition('b', 0), true);
+    assert.equal(list.size, 0);
+  });
+
+  it('keeps an entry that has moved on before its old position is reused',
+      () => {
+        const list = new core.TopList();
+        list.notePosition('a', 0);
+        list.set(entry('a', 80, 3));
+        assert.equal(list.notePosition('b', 0), false);
+        assert.equal(list.size, 1);
+      });
+
+  it('rescores entries of an older settings version', () => {
+    const list = new core.TopList();
+    list.set(entry('a', 1));
+    list.rescore(settings, 1);
+    const [rescored] = list.ranked(1);
+    const expected = core.computeScore(rescored, rescored.hist, settings);
+    assert.equal(rescored.score, expected.score);
+    assert.equal(rescored.version, 1);
+  });
+
+  it('drops entries that no longer get a score', () => {
+    const list = new core.TopList();
+    list.set(entry('a', 50));
+    const zero = {...settings, weights: {overall: 0, recent: 0, discount: 0,
+      price: 0, popularity: 0}};
+    list.rescore(zero, 1);
+    assert.equal(list.size, 0);
+  });
+
+  it('forgets everything on clear', () => {
+    const list = new core.TopList();
+    list.notePosition('a', 0);
+    list.set(entry('a', 50, 0));
+    list.clear();
+    assert.equal(list.size, 0);
+    assert.equal(list.notePosition('b', 0), false);
   });
 });

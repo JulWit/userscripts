@@ -27,10 +27,14 @@ A collection of personal userscripts, located in `scripts/` as `*.user.js` files
   `node --test`.
 - Behavior on real pages is covered by end-to-end tests in `tests/e2e/`
   (Playwright, Firefox) on the fixture pages in `tests/fixtures/`; run them
-  with `npm run test:e2e`.
-- Scripts are type-checked from their JSDoc annotations
-  (`tsc -p jsconfig.json`); GM_* declarations live in `types/`. Keep both
-  passing after every change.
+  with `npm run test:e2e`. The Steam fixtures are served by Playwright at
+  `https://store.steampowered.com`, which also answers the histogram
+  requests, so the tests never reach the real site.
+- Scripts are type-checked in strict mode from their JSDoc annotations
+  (`tsc -p jsconfig.json`); GM_* declarations live in `types/`. Write
+  function types TypeScript-style (`(x: number) => string`): current
+  TypeScript no longer parses Closure's `function(number): string`. Keep
+  both passing after every change.
 
 ## Git workflow
 

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: Steam store page</title>
+<!--
+  Simplified markup of a Steam store page (server-rendered, with the
+  currency in its structured data) with two editions and a bundle, for
+  tests/e2e/steam-dealscore.e2e.js. The tests serve it at
+  https://store.steampowered.com/app/100/Alpha_Quest/.
+-->
+<meta itemprop="priceCurrency" content="EUR">
+<style>
+  body {
+    background: #1b2838;
+    color: #c7d5e0;
+    color-scheme: dark;
+    font: 14px/20px Arial, sans-serif;
+    margin: 0;
+  }
+
+  a {
+    color: #fff;
+  }
+
+  main {
+    margin: 16px auto;
+    width: 720px;
+  }
+
+  .apphub_AppName {
+    font-size: 26px;
+    line-height: 32px;
+  }
+
+  .game_area_purchase_game {
+    border: 1px solid #3d4450;
+    margin: 12px 0;
+    padding: 8px 12px;
+  }
+
+  .game_purchase_action {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="apphub_HomeHeaderContent">
+    <div class="apphub_AppName" id="appHubAppName">Alpha Quest</div>
+  </div>
+  <div id="game_area_purchase">
+    <div class="game_area_purchase_game" aria-labelledby="purchase-title-1001">
+      <h2 id="purchase-title-1001">Buy Alpha Quest</h2>
+      <form><input type="hidden" name="subid" value="1001"></form>
+      <div class="game_purchase_action">
+        <div class="discount_pct">-50%</div>
+        <div class="discount_original_price">19,99€</div>
+        <div class="discount_final_price">9,99€</div>
+        <a class="btn_green" href="#cart">Add to Cart</a>
+      </div>
+    </div>
+    <div class="game_area_purchase_game" aria-labelledby="purchase-title-1002">
+      <h2 id="purchase-title-1002">Buy Alpha Quest Deluxe Edition</h2>
+      <form><input type="hidden" name="subid" value="1002"></form>
+      <div class="game_purchase_action">
+        <div class="game_purchase_price">29,99€</div>
+        <a class="btn_green" href="#cart">Add to Cart</a>
+      </div>
+    </div>
+    <div class="game_area_purchase_game" aria-labelledby="purchase-title-b77">
+      <h2 id="purchase-title-b77">Buy Alpha Quest + Beta Saga Bundle</h2>
+      <form><input type="hidden" name="bundleid" value="77"></form>
+      <div class="game_purchase_action">
+        <div class="discount_pct">-20%</div>
+        <div class="discount_original_price">34,98€</div>
+        <div class="discount_final_price">27,98€</div>
+        <a class="btn_green" href="#cart">Add to Cart</a>
+      </div>
+    </div>
+  </div>
+</main>
+<script src="/tests/fixtures/harness.js"></script>
+<script src="/scripts/steam-dealscore.user.js"></script>
+</body>
+</html>

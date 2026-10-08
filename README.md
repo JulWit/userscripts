@@ -31,11 +31,14 @@ runs the unit tests in `tests/` (no dependencies), and
 npx -p typescript tsc -p jsconfig.json
 ```
 
-type-checks the scripts against their JSDoc annotations (editors such as
-VS Code and Zed do this automatically via `jsconfig.json`).
+type-checks the scripts against their JSDoc annotations in strict mode
+(editors such as VS Code and Zed do this automatically via `jsconfig.json`).
 
-The end-to-end tests in `tests/e2e/` run the Reading Ruler in Firefox on
-the pages in `tests/fixtures/` and need [Playwright](https://playwright.dev/):
+The end-to-end tests in `tests/e2e/` run both scripts in Firefox on the
+pages in `tests/fixtures/` and need [Playwright](https://playwright.dev/).
+The Steam fixtures are served by Playwright under
+`https://store.steampowered.com`, together with made-up review data, so the
+tests never contact Steam:
 
 ```bash
 npm install
@@ -53,7 +56,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/serve.ps1
 and then <http://localhost:8765/tests/fixtures/article.html>.
 `tests/fixtures/harness.js` stands in for Violentmonkey; with `?touch` in
 the URL the page reports a touch screen, so the Reading Ruler shows its
-floating buttons.
+floating buttons. The Steam fixtures (`steam-*.html`) are meant for the
+end-to-end tests: the script picks its page type by the Steam URL path and
+loads review data from Steam, which only the tests provide.
 
 Script icons live as SVG in `icons/` and are embedded in each script's
 `@icon` as a base64 data URI. After editing an icon, regenerate the URI:

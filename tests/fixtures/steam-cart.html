@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: Steam cart</title>
+<!--
+  Simplified markup of the Steam cart (a head link with the capsule image,
+  the title as a separate element, remove buttons labelled by the title)
+  for tests/e2e/steam-dealscore.e2e.js. The tests serve it at
+  https://store.steampowered.com/cart/.
+-->
+<style>
+  body {
+    background: #1b2838;
+    color: #c7d5e0;
+    color-scheme: dark;
+    font: 14px/20px Arial, sans-serif;
+    margin: 0;
+  }
+
+  a {
+    color: #fff;
+  }
+
+  #cart {
+    margin: 16px auto;
+    width: 720px;
+  }
+
+  .item {
+    align-items: center;
+    border-bottom: 1px solid #3d4450;
+    display: flex;
+    gap: 12px;
+    padding: 8px;
+  }
+
+  .item img {
+    display: block;
+    height: 40px;
+    width: 92px;
+  }
+
+  .details {
+    flex: 1;
+  }
+
+  .price {
+    display: flex;
+    gap: 8px;
+  }
+</style>
+</head>
+<body>
+<div id="cart">
+  <div class="item">
+    <a href="https://store.steampowered.com/app/100/Alpha_Quest/"><img alt="Alpha Quest" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a>
+    <div class="details">
+      <div id="title-100">Alpha Quest</div>
+      <div class="price">
+        <div>-50%</div>
+        <div>19,99€</div>
+        <div>9,99€</div>
+      </div>
+    </div>
+    <button type="button" id="remove-100" aria-labelledby="remove-100 title-100">Remove</button>
+  </div>
+  <div class="item">
+    <a href="https://store.steampowered.com/bundle/55/Mega_Bundle/"><img alt="Mega Bundle" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a>
+    <div class="details">
+      <div id="title-55">Mega Bundle</div>
+      <div class="includes">
+        <a href="https://store.steampowered.com/app/200/Beta_Saga/">Beta Saga</a>
+        <a href="https://store.steampowered.com/app/400/Delta_Bargain/">Delta Bargain</a>
+      </div>
+      <div class="price">
+        <div>-30%</div>
+        <div>40,00€</div>
+        <div>28,00€</div>
+      </div>
+    </div>
+    <button type="button" id="remove-55" aria-labelledby="remove-55 title-55">Remove</button>
+  </div>
+</div>
+<script src="/tests/fixtures/harness.js"></script>
+<script src="/scripts/steam-dealscore.user.js"></script>
+</body>
+</html>

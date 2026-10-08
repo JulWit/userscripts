@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: Steam wishlist</title>
+<!--
+  Simplified markup of the Steam wishlist (a virtualized React list with one
+  div[data-index] per row) for tests/e2e/steam-dealscore.e2e.js. The tests
+  serve it at https://store.steampowered.com/wishlist/..., as the script
+  picks its page adapter by path.
+-->
+<style>
+  body {
+    background: #1b2838;
+    color: #c7d5e0;
+    color-scheme: dark;
+    font: 14px/20px Arial, sans-serif;
+    margin: 0;
+  }
+
+  a {
+    color: #fff;
+  }
+
+  #wishlist {
+    margin: 16px auto;
+    width: 720px;
+  }
+
+  .row {
+    align-items: center;
+    border-bottom: 1px solid #3d4450;
+    display: flex;
+    gap: 12px;
+    padding: 8px;
+  }
+
+  .capsule img {
+    display: block;
+    height: 40px;
+    width: 92px;
+  }
+
+  .info {
+    flex: 1;
+  }
+
+  .purchase {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+  }
+
+  .original {
+    text-decoration: line-through;
+  }
+</style>
+</head>
+<body>
+<div id="wishlist">
+  <div class="rows">
+    <div data-index="0">
+      <div class="row">
+        <a class="capsule" href="https://store.steampowered.com/app/100/Alpha_Quest/"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a>
+        <div class="info">
+          <div class="name"><a href="https://store.steampowered.com/app/100/Alpha_Quest/">Alpha Quest</a></div>
+          <div class="purchase">
+            <div class="discount">-50%</div>
+            <div class="original">19,99€</div>
+            <div class="final">9,99€</div>
+            <button type="button">Add to cart</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div data-index="1">
+      <div class="row">
+        <a class="capsule" href="https://store.steampowered.com/app/200/Beta_Saga/"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a>
+        <div class="info">
+          <div class="name"><a href="https://store.steampowered.com/app/200/Beta_Saga/">Beta Saga</a></div>
+          <div class="purchase">
+            <div class="final">14,99€</div>
+            <button type="button">Add to cart</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div data-index="2">
+      <div class="row">
+        <a class="capsule" href="https://store.steampowered.com/app/300/Gamma_Soon/"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a>
+        <div class="info">
+          <div class="name"><a href="https://store.steampowered.com/app/300/Gamma_Soon/">Gamma Soon</a></div>
+          <div class="purchase">
+            <div class="release">Coming soon</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div data-index="3">
+      <div class="row">
+        <a class="capsule" href="https://store.steampowered.com/app/400/Delta_Bargain/"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a>
+        <div class="info">
+          <div class="name"><a href="https://store.steampowered.com/app/400/Delta_Bargain/">Delta Bargain</a></div>
+          <div class="purchase">
+            <div class="discount">-80%</div>
+            <div class="original">24,99€</div>
+            <div class="final">4,99€</div>
+            <button type="button">Add to cart</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/tests/fixtures/harness.js"></script>
+<script src="/scripts/steam-dealscore.user.js"></script>
+</body>
+</html>

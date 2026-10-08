@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Wishlist – Deal Score
 // @namespace    https://store.steampowered.com/wishlist/dealscore
-// @version      1.12.1
+// @version      1.13.0
 // @description  Deal score (1–100) for the wishlist, cart and store pages, with a top-deals panel on the wishlist
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -16,6 +16,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
+// @grant        GM_addValueChangeListener
 // @grant        GM_registerMenuCommand
 // @run-at       document-idle
 // @noframes
@@ -54,14 +55,18 @@
    */
 
   /**
+   * currency is 'auto' (detected from the page) or an ISO 4217 code from
+   * TEXT.currencyPatterns.
    * @typedef {{weights: !Weights, referencePrice: number,
-   *     fetchExtra: boolean, qualityPenalty: boolean}} Settings
+   *     fetchExtra: boolean, qualityPenalty: boolean,
+   *     currency: string}} Settings
    */
 
   /**
    * State of the extra data for one or more games.
    * @typedef {Object} Extra
-   * @property {string} state 'ok' | 'pending' | 'failed' | 'disabled'
+   * @property {string} state 'ok' | 'pending' | 'failed' | 'disabled' |
+   *     'unused' (no price, so no score that would need it)
    * @property {?Histogram} hist
    * @property {number|string} t Load time(s), part of the badge signature.
    * @property {number} [missing] Bundles: included games without data.
@@ -69,10 +74,8 @@
 
   /**
    * In-memory cache entry.
-   * @typedef {Object} HistEntry
-   * @property {string} status 'ok' | 'pending' | 'failed'
-   * @property {number} [t]
-   * @property {?Histogram} [hist]
+   * @typedef {{status: 'ok', t: number, hist: !Histogram}|
+   *     {status: 'pending'}|{status: 'failed', t: number}} HistEntry
    */
 
   /**
@@ -84,34 +87,44 @@
    * @property {!Array<string>} appids
    * @property {string} title
    * @property {!Node} anchorEl Node the badge is inserted before (the title).
+   * @property {?Element} focusEl Focusable element of the entry (the title
+   *     link) whose keyboard focus opens the tooltip; null makes the badge
+   *     itself focusable.
    * @property {?Price} price
    * @property {number} [bundleSize]
    * @property {!Array<string>} [notes]
    */
 
   /**
-   * One component of the score. value (0–1) and points are only set when the
-   * component is available; the remaining fields describe the input.
-   * @typedef {Object} ScorePart
-   * @property {boolean} available
-   * @property {number} weight
-   * @property {number} [value]
-   * @property {number} [points]
-   * @property {?number} [pct]
-   * @property {number} [n]
-   * @property {number} [amount]
-   * @property {boolean} [free]
+   * One component of the score. value (0–1) and points are 0 when the
+   * component is not available.
+   * @typedef {{available: boolean, weight: number, value: number,
+   *     points: number}} ScorePart
+   */
+
+  /**
+   * @typedef {{overall: !ScorePart, recent: !ScorePart, discount: !ScorePart,
+   *     price: !ScorePart, popularity: !ScorePart}} ScoreParts
+   */
+
+  /**
+   * Inputs of the score, as shown in the tooltip. recentPositive is null
+   * without reviews in the last 30 days.
+   * @typedef {{reviews: number, positive: number, recentReviews: number,
+   *     recentPositive: ?number, discount: number, finalPrice: number,
+   *     free: boolean}} ScoreInputs
    */
 
   /**
    * Result of the score calculation.
-   * @typedef {Object} ScoreResult
-   * @property {string} status 'ok' | 'noPrice' | 'noWeights'
-   * @property {number} [score]
-   * @property {number} [penalty]
-   * @property {number} [penaltyPoints]
-   * @property {!Object<string, !ScorePart>} [parts]
-   * @property {boolean} [hasReviews]
+   * @typedef {{status: 'ok', score: number, penalty: number,
+   *     penaltyPoints: number, parts: !ScoreParts, inputs: !ScoreInputs,
+   *     hasReviews: boolean}} ScoreOk
+   */
+
+  /**
+   * @typedef {{status: 'noPrice'}|{status: 'noWeights'}|!ScoreOk}
+   *     ScoreResult
    */
 
   /**
@@ -153,7 +166,7 @@
    * Freezes an object including nested objects and arrays.
    * @param {T} value
    * @return {T}
-   * @template T
+   * @template {object} T
    */
   function deepFreeze(value) {
     for (const child of Object.values(value)) {
@@ -170,8 +183,13 @@
 
     // Default weights (adjustable in the settings dialog).
     weights: {overall: 25, recent: 15, discount: 30, price: 20, popularity: 10},
-    // At this final price (in TEXT.currencyCode) the price component is 0.5.
+    // At this final price (in the store currency) the price component is 0.5.
     referencePrice: 20,
+    // Store currency: 'auto' detects it from the page, otherwise an ISO 4217
+    // code from TEXT.currencyPatterns (adjustable in the settings dialog).
+    currency: 'auto',
+    // Used until a currency was detected for the first time.
+    fallbackCurrency: 'EUR',
     // Load the histogram – the only source for all review values.
     fetchExtra: true,
     // S · min(1, 0.5 + R)
@@ -209,6 +227,10 @@
     // On 429 / 5xx; delays of 2 s, 4 s, 8 s, 16 s.
     maxRetries: 4,
     retryBaseDelayMs: 2000,
+    // A request that takes longer is aborted and frees its slot.
+    requestTimeoutMs: 15 * 1000,
+    // While no list is found, the page is searched at most this often.
+    searchIntervalMs: 250,
     histogramQuery: '?l=english&review_score_preference=0',
     // Hover delay of the score tooltip (the native title tooltip waits
     // ~500 ms and does not work on touch devices).
@@ -229,17 +251,18 @@
 
   // Locale-dependent patterns and formats – collected in one place. The
   // patterns match Steam's page text, which depends on the store language.
-  // Prices are only recognized in currencyCode: the reference price and all
-  // formatting assume that currency. For another store currency, change
-  // currencyCode and the reference price.
+  // Prices are only recognized in the store currency (see CONFIG.currency):
+  // the reference price and all formatting assume that currency.
   const TEXT = deepFreeze({
     locale: 'en-US',
-    currencyCode: 'EUR',
-    // How Steam prints the currency, by ISO 4217 code. No \b next to symbols:
-    // "ł" is not a word character and Steam writes "12,99zł" without a space.
+    // How Steam prints the currency, by ISO 4217 code; these are the
+    // supported store currencies. No \b next to symbols: "ł" is not a word
+    // character and Steam writes "12,99zł" without a space. A "$" directly
+    // after a letter belongs to another dollar currency ("CDN$", "A$", "R$")
+    // or to a title ("Ca$h").
     currencyPatterns: {
       EUR: /€|\bEUR\b/,
-      USD: /\$|\bUSD\b/,
+      USD: /(?<![A-Za-z])\$|\bUSD\b/,
       GBP: /£|\bGBP\b/,
       CHF: /\bCHF\b/,
       PLN: /zł|\bPLN\b/,
@@ -248,13 +271,15 @@
     free: /^(?:free(?: to play)?|gratis|kostenlos(?: spielbar| spielen)?)$/i,
   });
 
-  /** Matches a price in the store currency. */
-  const CURRENCY_PATTERN = TEXT.currencyPatterns[TEXT.currencyCode];
-
   const PREFIX = 'sws';
   const STORAGE_SETTINGS = 'settings';
-  const STORAGE_CACHE_PREFIX = 'hist:';
+  /** Common prefix of all cache keys, including those of older versions. */
+  const STORAGE_CACHE_ROOT = 'hist:';
+  /** Prefix of the current cache format; bump when the entry shape changes. */
+  const STORAGE_CACHE_PREFIX = `${STORAGE_CACHE_ROOT}v1:`;
   const STORAGE_PANEL = 'panel';
+  /** Last currency detected from a page, used until the next detection. */
+  const STORAGE_CURRENCY = 'detectedCurrency';
   const OWN_SELECTOR = `.${PREFIX}-badge, .${PREFIX}-dialog, ` +
       `.${PREFIX}-tooltip, .${PREFIX}-panel`;
 
@@ -304,18 +329,72 @@
   }
 
   /**
+   * @param {string} code ISO 4217 code.
+   * @return {boolean} Whether the currency is supported.
+   */
+  function isSupportedCurrency(code) {
+    return Object.hasOwn(TEXT.currencyPatterns, code);
+  }
+
+  /**
+   * @param {string} code Supported ISO 4217 code.
+   * @return {!RegExp} Matches a price in that currency.
+   */
+  function currencyPattern(code) {
+    const patterns = /** @type {!Object<string, !RegExp>} */ (
+      TEXT.currencyPatterns);
+    if (!isSupportedCurrency(code)) {
+      throw new Error(`Unsupported currency ${code}`);
+    }
+    return patterns[code];
+  }
+
+  /**
+   * Detects the store currency from price texts: the supported currency that
+   * most texts with a number show. Texts that match several currencies are
+   * ambiguous and do not count.
+   * @param {!Iterable<string>} texts
+   * @return {?string} ISO 4217 code, null if no text shows a price.
+   */
+  function detectCurrency(texts) {
+    /** @type {!Map<string, number>} */
+    const counts = new Map();
+    for (const text of texts) {
+      if (!/\d/.test(text)) continue;
+      const codes = Object.keys(TEXT.currencyPatterns).filter(
+          (code) => currencyPattern(code).test(text));
+      if (codes.length === 1) {
+        counts.set(codes[0], (counts.get(codes[0]) || 0) + 1);
+      }
+    }
+    let best = null;
+    let bestCount = 0;
+    for (const [code, count] of counts) {
+      if (count > bestCount) {
+        best = code;
+        bestCount = count;
+      }
+    }
+    return best;
+  }
+
+  /**
    * Localized label such as "20% off. Regular price €31.99, now €25.59."
    * @param {?string} label
+   * @param {string} currency Store currency (ISO 4217 code).
    * @return {?Price}
    */
-  function parsePriceLabel(label) {
-    if (!label || !CURRENCY_PATTERN.test(label)) return null;
+  function parsePriceLabel(label, currency) {
+    if (!label || !currencyPattern(currency).test(label)) return null;
     const discountMatch = label.match(/(\d{1,3})\s*%/);
     if (!discountMatch) return null;
-    const rest = label.slice(0, discountMatch.index) + ' ' +
-        label.slice(discountMatch.index + discountMatch[0].length);
-    const amounts =
-        findNumbers(rest).map(parseMoney).filter((value) => value != null);
+    const start = discountMatch.index ?? 0;
+    const rest = label.slice(0, start) + ' ' +
+        label.slice(start + discountMatch[0].length);
+    const amounts = findNumbers(rest).flatMap((text) => {
+      const value = parseMoney(text);
+      return value == null ? [] : [value];
+    });
     if (amounts.length < 2) return null;
     const final = amounts[amounts.length - 1];
     return {
@@ -330,11 +409,15 @@
    * Visible texts of the price area: "-20%", "31,99€", "25,59€" or
    * "19,50€" or "Free".
    * @param {!Array<string>} texts
+   * @param {string} currency Store currency (ISO 4217 code).
    * @return {?Price}
    */
-  function parsePriceTexts(texts) {
+  function parsePriceTexts(texts, currency) {
+    const pattern = currencyPattern(currency);
+    /** @type {?number} */
     let discount = null;
     let free = false;
+    /** @type {!Array<number>} */
     const amounts = [];
     for (const raw of texts) {
       const text = String(raw).replace(/\s+/g, ' ').trim();
@@ -344,8 +427,7 @@
         discount = Number(discountMatch[1]);
       } else if (TEXT.free.test(text)) {
         free = true;
-      } else if (text.length <= 24 && /\d/.test(text) &&
-          CURRENCY_PATTERN.test(text)) {
+      } else if (text.length <= 24 && /\d/.test(text) && pattern.test(text)) {
         const value = parseMoney(text);
         if (value != null) amounts.push(value);
       }
@@ -371,6 +453,10 @@
     if (!json || json.success !== 1 || !json.results) {
       throw new Error('Histogram: unexpected response');
     }
+    /**
+     * @param {*} list
+     * @return {!Array<number>} [up, down]
+     */
     const sum = (list) => (Array.isArray(list) ? list : []).reduce(
         (acc, day) => [
           acc[0] + (Number(day.recommendations_up) || 0),
@@ -397,6 +483,56 @@
           downTotal: acc.downTotal + hist.downTotal,
         }),
         {up30: 0, down30: 0, upTotal: 0, downTotal: 0});
+  }
+
+  /**
+   * Validates a stored cache entry: a histogram with its load time.
+   * @param {*} entry Value read from storage.
+   * @param {number} now
+   * @param {number} ttlMs
+   * @return {?{hist: !Histogram, t: number}} null if the entry is missing,
+   *     malformed or expired.
+   */
+  function readCacheEntry(entry, now, ttlMs) {
+    if (!entry || typeof entry !== 'object') return null;
+    const t = entry.t;
+    if (!Number.isFinite(t) || t > now || now - t >= ttlMs) return null;
+    /**
+     * @param {*} value
+     * @return {number} The value if it is a valid count, otherwise NaN.
+     */
+    const count = (value) =>
+        Number.isFinite(value) && value >= 0 ? value : NaN;
+    const hist = {
+      up30: count(entry.up30),
+      down30: count(entry.down30),
+      upTotal: count(entry.upTotal),
+      downTotal: count(entry.downTotal),
+    };
+    return Object.values(hist).some(Number.isNaN) ? null : {hist, t};
+  }
+
+  /**
+   * Combines the extra data of a bundle's games: the histograms of all
+   * loaded games are added up.
+   * @param {!Array<!Extra>} parts One entry per game.
+   * @return {!Extra}
+   */
+  function combineExtras(parts) {
+    if (!parts.length) return {state: 'failed', hist: null, t: 0};
+    if (parts.length === 1) return parts[0];
+    if (parts.some((part) => part.state === 'pending')) {
+      return {state: 'pending', hist: null, t: 0};
+    }
+    const loaded = parts.filter((part) => part.state === 'ok' && part.hist);
+    if (!loaded.length) return {state: 'failed', hist: null, t: 0};
+    return {
+      state: 'ok',
+      hist: combineHistograms(loaded.map(
+          (part) => /** @type {!Histogram} */ (part.hist))),
+      t: loaded.map((part) => part.t).join(','),
+      missing: parts.length - loaded.length,
+    };
   }
 
   /**
@@ -444,76 +580,71 @@
    */
   function computeScore(row, hist, settings) {
     if (!row.price) return {status: 'noPrice'};
+    const price = row.price;
     const weights = settings.weights;
     const histTotal = hist ? hist.upTotal + hist.downTotal : 0;
-    const hasReviews = histTotal > 0;
+    const hasReviews = Boolean(hist) && histTotal > 0;
+    /**
+     * @param {number} weight
+     * @param {?number} value null: component not available.
+     * @return {!ScorePart} Points are filled in below.
+     */
+    const part = (weight, value) => value == null ?
+        {available: false, weight, value: 0, points: 0} :
+        {available: true, weight, value, points: 0};
 
-    /** @type {!Object<string, !ScorePart>} */
-    const parts = {};
-    if (hasReviews) {
+    /** @type {!ScoreInputs} */
+    const inputs = {
+      reviews: histTotal,
+      positive: 0,
+      recentReviews: 0,
+      recentPositive: null,
+      discount: price.discount,
+      finalPrice: price.final,
+      free: price.free,
+    };
+    let overallValue = null;
+    let recentValue = null;
+    if (hist && hasReviews) {
       const pAll = hist.upTotal / histTotal;
       const ratingG = shrinkRating(pAll, histTotal);
-      parts.overall = {
-        available: true,
-        value: easeOut((ratingG - 0.5) / 0.5, CONFIG.reviewCurve),
-        weight: weights.overall,
-        pct: pAll,
-        n: histTotal,
-      };
+      overallValue = easeOut((ratingG - 0.5) / 0.5, CONFIG.reviewCurve);
       const n30 = hist.up30 + hist.down30;
       const p30 = (hist.up30 + CONFIG.recentPrior * ratingG) /
           (n30 + CONFIG.recentPrior);
-      parts.recent = {
-        available: true,
-        value: easeOut((p30 - 0.5) / 0.5, CONFIG.reviewCurve),
-        weight: weights.recent,
-        pct: n30 ? hist.up30 / n30 : null,
-        n: n30,
-      };
-    } else {
-      parts.overall = {available: false, weight: weights.overall};
-      parts.recent = {available: false, weight: weights.recent};
+      recentValue = easeOut((p30 - 0.5) / 0.5, CONFIG.reviewCurve);
+      inputs.positive = pAll;
+      inputs.recentReviews = n30;
+      inputs.recentPositive = n30 ? hist.up30 / n30 : null;
     }
 
-    parts.discount = {
-      available: true,
-      value: easeOut(row.price.discount / 100, CONFIG.discountCurve),
-      weight: weights.discount,
-      pct: row.price.discount,
+    /** @type {!ScoreParts} */
+    const parts = {
+      overall: part(weights.overall, overallValue),
+      recent: part(weights.recent, recentValue),
+      discount: part(weights.discount,
+          easeOut(price.discount / 100, CONFIG.discountCurve)),
+      price: part(weights.price, priceValue(
+          price.final, settings.referencePrice, CONFIG.priceExponent)),
+      popularity: part(weights.popularity, hist ?
+          clamp01(Math.log10(histTotal + 1) / CONFIG.popularityLogScale) :
+          null),
     };
-    parts.price = {
-      available: true,
-      value: priceValue(
-          row.price.final, settings.referencePrice, CONFIG.priceExponent),
-      weight: weights.price,
-      amount: row.price.final,
-      free: row.price.free,
-    };
-    if (hist) {
-      parts.popularity = {
-        available: true,
-        value: clamp01(Math.log10(histTotal + 1) / CONFIG.popularityLogScale),
-        weight: weights.popularity,
-        n: histTotal,
-      };
-    } else {
-      parts.popularity = {available: false, weight: weights.popularity};
-    }
 
     let weightSum = 0;
     let weightedSum = 0;
-    for (const part of Object.values(parts)) {
-      if (part.available && part.weight > 0) {
-        weightSum += part.weight;
-        weightedSum += part.weight * part.value;
+    for (const component of Object.values(parts)) {
+      if (component.available && component.weight > 0) {
+        weightSum += component.weight;
+        weightedSum += component.weight * component.value;
       }
     }
-    if (weightSum <= 0) return {status: 'noWeights', parts};
+    if (weightSum <= 0) return {status: 'noWeights'};
 
     // Points each component adds to the score (before the quality penalty).
-    for (const part of Object.values(parts)) {
-      part.points = part.available && part.weight > 0 ?
-          99 * part.weight * part.value / weightSum :
+    for (const component of Object.values(parts)) {
+      component.points = component.available && component.weight > 0 ?
+          99 * component.weight * component.value / weightSum :
           0;
     }
 
@@ -529,7 +660,15 @@
       total *= penalty;
     }
     const score = Math.min(100, Math.max(1, Math.round(1 + 99 * total)));
-    return {status: 'ok', score, penalty, penaltyPoints, parts, hasReviews};
+    return {
+      status: 'ok',
+      score,
+      penalty,
+      penaltyPoints,
+      parts,
+      inputs,
+      hasReviews,
+    };
   }
 
   /**
@@ -573,13 +712,33 @@
   // Number formats are created once: toLocaleString with options builds a new
   // formatter on every call.
   const INTEGER_FORMAT = new Intl.NumberFormat(TEXT.locale);
-  const MONEY_FORMAT = new Intl.NumberFormat(
-      TEXT.locale, {style: 'currency', currency: TEXT.currencyCode});
   /** @type {!Map<number, !Intl.NumberFormat>} Keyed by decimal places. */
   const decimalFormats = new Map();
-  /** Currency symbol for labels, e.g. "€". */
-  const CURRENCY_SYMBOL = MONEY_FORMAT.formatToParts(0)
-      .find((part) => part.type === 'currency')?.value || TEXT.currencyCode;
+  /** @type {!Map<string, !Intl.NumberFormat>} Keyed by currency code. */
+  const moneyFormats = new Map();
+
+  /**
+   * @param {string} currency ISO 4217 code.
+   * @return {!Intl.NumberFormat}
+   */
+  function moneyFormat(currency) {
+    let format = moneyFormats.get(currency);
+    if (!format) {
+      format = new Intl.NumberFormat(
+          TEXT.locale, {style: 'currency', currency});
+      moneyFormats.set(currency, format);
+    }
+    return format;
+  }
+
+  /**
+   * @param {string} currency ISO 4217 code.
+   * @return {string} Currency symbol for labels, e.g. "€".
+   */
+  function currencySymbol(currency) {
+    return moneyFormat(currency).formatToParts(0)
+        .find((part) => part.type === 'currency')?.value || currency;
+  }
 
   /**
    * @param {number} value
@@ -599,10 +758,11 @@
 
   /**
    * @param {number} value
+   * @param {string} currency ISO 4217 code.
    * @return {string} e.g. "€7.49".
    */
-  function formatMoney(value) {
-    return MONEY_FORMAT.format(value);
+  function formatMoney(value, currency) {
+    return moneyFormat(currency).format(value);
   }
 
   /**
@@ -626,19 +786,27 @@
    * Builds the tooltip content: a table with the points each component adds
    * to the score, followed by notes.
    * @param {!ScoreResult} result
-   * @param {string} extraState 'ok' | 'pending' | 'failed' | 'disabled'
+   * @param {string} extraState 'ok' | 'pending' | 'failed' | 'disabled' |
+   *     'unused'
    * @param {{bundleSize?: number, bundleMissing?: number,
-   *     notes?: !Array<string>}=} meta Bundle details and
-   *     additional lines.
+   *     notes?: !Array<string>, currency?: string}=} meta Bundle details,
+   *     additional lines and the store currency (default
+   *     CONFIG.fallbackCurrency).
    * @return {!TooltipContent}
    */
   function buildTooltip(result, extraState, meta = {}) {
+    const currency = meta.currency || CONFIG.fallbackCurrency;
+    /**
+     * @param {string} title
+     * @param {string} note
+     * @return {!TooltipContent}
+     */
     const message = (title, note) =>
-        ({title, rows: [], total: '', notes: note ? [note] : []});
+      ({title, rows: [], total: '', notes: note ? [note] : []});
     if (result.status === 'noPrice') {
       return message('Deal score: –',
           'No price available (unreleased, not purchasable or not in ' +
-              `${TEXT.currencyCode}).`);
+              `${currency}).`);
     }
     if (extraState === 'pending') {
       return message('Deal score: loading extra data …', '');
@@ -647,8 +815,13 @@
       return message('Deal score: –',
           'All weights of the available components are 0.');
     }
-    const parts = result.parts;
-    /** @type {function(string, string, !Object): !TooltipRow} */
+    const {parts, inputs} = result;
+    /**
+     * @param {string} label
+     * @param {string} value
+     * @param {!ScorePart} part
+     * @return {!TooltipRow}
+     */
     const row = (label, value, part) => part.available ?
         {
           label,
@@ -664,33 +837,27 @@
       weight: '',
     }];
 
-    const overall = parts.overall;
-    rows.push(row('Overall rating', overall.available ?
-        `${formatPercent(overall.pct)} (${formatInteger(overall.n)}, ` +
-            'all languages)' :
-        '', overall));
+    rows.push(row('Overall rating',
+        `${formatPercent(inputs.positive)} ` +
+            `(${formatInteger(inputs.reviews)}, all languages)`,
+        parts.overall));
 
-    const recent = parts.recent;
-    let recentText = '';
-    if (recent.available) {
-      recentText = recent.n ?
-          `${formatPercent(recent.pct)} (${formatInteger(recent.n)})` :
-          'no new reviews';
-    }
-    rows.push(row('Last 30 days', recentText, recent));
+    const recentText = inputs.recentPositive == null ?
+        'no new reviews' :
+        `${formatPercent(inputs.recentPositive)} ` +
+            `(${formatInteger(inputs.recentReviews)})`;
+    rows.push(row('Last 30 days', recentText, parts.recent));
 
-    const discount = parts.discount;
     rows.push(row('Discount',
-        discount.pct > 0 ? `−${discount.pct}%` : 'none', discount));
+        inputs.discount > 0 ? `−${inputs.discount}%` : 'none',
+        parts.discount));
 
-    const price = parts.price;
     rows.push(row('Price',
-        price.free ? 'free' : formatMoney(price.amount), price));
+        inputs.free ? 'free' : formatMoney(inputs.finalPrice, currency),
+        parts.price));
 
-    const popularity = parts.popularity;
-    rows.push(row('Popularity', popularity.available ?
-        `${formatInteger(popularity.n)} reviews` :
-        '', popularity));
+    rows.push(row('Popularity', `${formatInteger(inputs.reviews)} reviews`,
+        parts.popularity));
 
     if (result.penalty < 1) {
       rows.push({
@@ -734,33 +901,39 @@
       referencePrice: CONFIG.referencePrice,
       fetchExtra: CONFIG.fetchExtra,
       qualityPenalty: CONFIG.qualityPenalty,
+      currency: CONFIG.currency,
     };
   }
 
   /**
    * Validates stored or entered values: invalid ones are replaced by the
    * defaults, numbers are clamped to CONFIG.limits.
-   * @param {?Object} raw
+   * @param {*} raw
    * @return {!Settings}
    */
   function sanitizeSettings(raw) {
-    const input = raw || {};
+    const input = raw && typeof raw === 'object' ? raw : {};
     const defaults = defaultSettings();
     /**
-     * @param {*} value
+     * @param {*} value Number or numeric string (form input).
      * @param {number} fallback
      * @param {{min: number, max: number}} limit
      * @return {number}
      */
-    const toNumber = (value, fallback, limit) =>
-        value !== '' && value !== null && Number.isFinite(Number(value)) ?
-        Math.min(limit.max, Math.max(limit.min, Number(value))) :
-        fallback;
+    const toNumber = (value, fallback, limit) => {
+      const numeric = typeof value === 'number' ||
+          (typeof value === 'string' && value.trim() !== '');
+      return numeric && Number.isFinite(Number(value)) ?
+          Math.min(limit.max, Math.max(limit.min, Number(value))) :
+          fallback;
+    };
     const weights = {...defaults.weights};
-    for (const key of Object.keys(weights)) {
+    const keys = /** @type {!Array<keyof Weights>} */ (Object.keys(weights));
+    for (const key of keys) {
       weights[key] = toNumber(
           input.weights?.[key], weights[key], CONFIG.limits.weight);
     }
+    const currency = input.currency;
     return {
       weights,
       referencePrice: toNumber(input.referencePrice, defaults.referencePrice,
@@ -771,7 +944,97 @@
       qualityPenalty: typeof input.qualityPenalty === 'boolean' ?
           input.qualityPenalty :
           defaults.qualityPenalty,
+      currency: currency === 'auto' ||
+          (typeof currency === 'string' && isSupportedCurrency(currency)) ?
+          currency :
+          defaults.currency,
     };
+  }
+
+  /**
+   * Scored wishlist entries for the top list panel. The wishlist is
+   * virtualized: only the rows near the viewport exist, so the list collects
+   * every scored row seen while scrolling. An entry is dropped again when
+   * another game takes over its list position (removed from the wishlist,
+   * list re-sorted).
+   */
+  class TopList {
+    constructor() {
+      /** @const {!Map<string, !TopEntry>} Entries by key. */
+      this.entries = new Map();
+      /** @const {!Map<number, string>} Key last seen at each position. */
+      this.keyAtPosition = new Map();
+    }
+
+    /** @return {number} Number of entries. */
+    get size() {
+      return this.entries.size;
+    }
+
+    /** Forgets all entries, e.g. when the list was replaced. */
+    clear() {
+      this.entries.clear();
+      this.keyAtPosition.clear();
+    }
+
+    /**
+     * Records which entry is shown at a list position. An entry whose
+     * position is taken over by another one was removed or has moved; it is
+     * dropped until its row is rendered again.
+     * @param {string} key
+     * @param {number} position
+     * @return {boolean} Whether an entry was dropped.
+     */
+    notePosition(key, position) {
+      const previous = this.keyAtPosition.get(position);
+      if (previous === key) return false;
+      this.keyAtPosition.set(position, key);
+      const displaced = previous ? this.entries.get(previous) : undefined;
+      if (!displaced || displaced.position !== position) return false;
+      this.entries.delete(displaced.key);
+      return true;
+    }
+
+    /** @param {!TopEntry} entry */
+    set(entry) {
+      this.entries.set(entry.key, entry);
+    }
+
+    /** @param {string} key */
+    delete(key) {
+      this.entries.delete(key);
+    }
+
+    /**
+     * Recomputes the scores of entries that were computed with another
+     * settings version, and drops entries that no longer get a score.
+     * @param {!Settings} settings
+     * @param {number} version
+     */
+    rescore(settings, version) {
+      for (const entry of this.entries.values()) {
+        if (entry.version === version) continue;
+        const hist = settings.fetchExtra ? entry.hist : null;
+        const result = computeScore(entry, hist, settings);
+        if (result.status === 'ok') {
+          entry.score = result.score;
+          entry.version = version;
+        } else {
+          this.entries.delete(entry.key);
+        }
+      }
+    }
+
+    /**
+     * @param {number} size
+     * @return {!Array<!TopEntry>} The best entries, best first; equal scores
+     *     sorted by title.
+     */
+    ranked(size) {
+      return [...this.entries.values()]
+          .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
+          .slice(0, size);
+    }
   }
 
   /** The pure functions, for unit tests and the debug console. */
@@ -779,10 +1042,15 @@
     config: CONFIG,
     text: TEXT,
     parseMoney,
+    isSupportedCurrency,
+    currencyPattern,
+    detectCurrency,
     parsePriceLabel,
     parsePriceTexts,
     summarizeHistogram,
     combineHistograms,
+    readCacheEntry,
+    combineExtras,
     shrinkRating,
     easeOut,
     priceValue,
@@ -791,6 +1059,7 @@
     buildTooltip,
     defaultSettings,
     sanitizeSettings,
+    TopList,
   });
 
   // Unit tests (tests/*.test.js) load this file with a hook instead of running
@@ -808,7 +1077,7 @@
   // Script managers provide GM_* as local identifiers, not necessarily as
   // window properties.
   /* global GM_getValue, GM_setValue, GM_deleteValue, GM_listValues,
-     GM_registerMenuCommand */
+     GM_addValueChangeListener, GM_registerMenuCommand */
 
   const DEBUG = CONFIG.debug || GM_getValue('debug', false) === true;
 
@@ -830,15 +1099,32 @@
   let cacheEpoch = 0;
 
   /**
+   * @return {string} Currency last detected on a page, or the fallback.
+   */
+  function storedCurrency() {
+    const code = GM_getValue(STORAGE_CURRENCY, null);
+    return typeof code === 'string' && isSupportedCurrency(code) ?
+        code :
+        CONFIG.fallbackCurrency;
+  }
+
+  /** Store currency used to read and format prices (ISO 4217 code). */
+  let currency =
+      settings.currency === 'auto' ? storedCurrency() : settings.currency;
+  /**
+   * Whether the currency is settled for this page: chosen in the settings or
+   * detected from the page. Until then the stored currency is a guess.
+   */
+  let currencySettled = settings.currency !== 'auto';
+
+  /**
    * @param {string} appid
-   * @return {?(Histogram & {t: number})} Cached totals with their load
+   * @return {?{hist: !Histogram, t: number}} Cached totals with their load
    *     time, if still valid.
    */
   function cacheRead(appid) {
-    const entry = GM_getValue(STORAGE_CACHE_PREFIX + appid, null);
-    const fresh = entry && typeof entry.t === 'number' &&
-        Date.now() - entry.t < CONFIG.cacheTtlMs;
-    return fresh ? entry : null;
+    return readCacheEntry(GM_getValue(STORAGE_CACHE_PREFIX + appid, null),
+        Date.now(), CONFIG.cacheTtlMs);
   }
 
   /**
@@ -850,18 +1136,19 @@
   }
 
   /**
-   * Deletes expired or all cache entries.
+   * Deletes invalid, expired or all cache entries, including entries in the
+   * format of older versions.
    * @param {boolean} all true: delete all entries.
    * @return {number} Number of deleted entries.
    */
   function cachePrune(all) {
     let removed = 0;
+    const now = Date.now();
     for (const key of GM_listValues()) {
-      if (!key.startsWith(STORAGE_CACHE_PREFIX)) continue;
-      const entry = GM_getValue(key, null);
-      const expired = !entry || typeof entry.t !== 'number' ||
-          Date.now() - entry.t >= CONFIG.cacheTtlMs;
-      if (all || expired) {
+      if (!key.startsWith(STORAGE_CACHE_ROOT)) continue;
+      const valid = key.startsWith(STORAGE_CACHE_PREFIX) &&
+          readCacheEntry(GM_getValue(key, null), now, CONFIG.cacheTtlMs);
+      if (all || !valid) {
         GM_deleteValue(key);
         removed++;
       }
@@ -893,6 +1180,32 @@
   }
 
   /**
+   * One request, aborted after CONFIG.requestTimeoutMs including the
+   * response body, so that a hanging request does not keep its slot.
+   * @param {string} url
+   * @return {!Promise<{status: number, json: *}>} json is only read for
+   *     status 200.
+   */
+  async function requestJson(url) {
+    const controller = new AbortController();
+    // A timer instead of AbortSignal.timeout(), so that the end-to-end tests
+    // can fast-forward it with a fake clock.
+    const timer =
+        setTimeout(() => controller.abort(), CONFIG.requestTimeoutMs);
+    try {
+      const response = await fetch(url, {
+        credentials: 'same-origin',
+        headers: {Accept: 'application/json'},
+        signal: controller.signal,
+      });
+      const json = response.status === 200 ? await response.json() : null;
+      return {status: response.status, json};
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Loads the review histogram, with backoff on 429 and 5xx. The endpoint is
    * public and same-origin, so a plain fetch suffices.
    * @param {string} appid
@@ -902,11 +1215,7 @@
     const path = `/appreviewhistogram/${appid}${CONFIG.histogramQuery}`;
     const url = new URL(path, location.href).href;
     for (let attempt = 0;; attempt++) {
-      const response = await fetch(url, {
-        credentials: 'same-origin',
-        headers: {Accept: 'application/json'},
-      });
-      const status = response.status;
+      const {status, json} = await requestJson(url);
       if (status === 429 || status >= 500) {
         if (attempt >= CONFIG.maxRetries) throw new Error(`HTTP ${status}`);
         const delay =
@@ -921,7 +1230,7 @@
         continue;
       }
       if (status !== 200) throw new Error(`HTTP ${status}`);
-      return summarizeHistogram(await response.json());
+      return summarizeHistogram(json);
     }
   }
 
@@ -965,7 +1274,7 @@
       return;
     }
     while (activeRequests < CONFIG.maxParallelRequests && queue.length) {
-      const appid = queue.shift();
+      const appid = /** @type {string} */ (queue.shift());
       // Only request games that are (still) rendered.
       if (!isRendered(appid)) {
         dropFromQueue(appid);
@@ -1007,28 +1316,29 @@
     const now = Date.now();
     let entry = histMem.get(appid);
     if (entry?.status === 'ok' && now - entry.t >= CONFIG.cacheTtlMs) {
-      entry = null;
+      entry = undefined;
     }
     if (entry?.status === 'failed' &&
         now - entry.t >= CONFIG.failedRetryAfterMs) {
-      entry = null;
+      entry = undefined;
     }
     if (!entry) {
       const cached = cacheRead(appid);
-      if (cached) {
-        entry = {status: 'ok', t: cached.t, hist: cached};
-        histMem.set(appid, entry);
-      } else {
-        entry = {status: 'pending'};
-        histMem.set(appid, entry);
-        enqueue(appid);
-      }
+      entry = cached ?
+          {status: 'ok', t: cached.t, hist: cached.hist} :
+          {status: 'pending'};
+      // Set before enqueue: the queue drops pending entries it skips.
+      histMem.set(appid, entry);
+      if (entry.status === 'pending') enqueue(appid);
     }
-    return {
-      state: entry.status,
-      hist: entry.status === 'ok' ? entry.hist : null,
-      t: entry.t || 0,
-    };
+    switch (entry.status) {
+      case 'ok':
+        return {state: 'ok', hist: entry.hist, t: entry.t};
+      case 'failed':
+        return {state: 'failed', hist: null, t: entry.t};
+      default:
+        return {state: 'pending', hist: null, t: 0};
+    }
   }
 
   /**
@@ -1038,25 +1348,35 @@
    */
   function getExtraFor(appids) {
     if (!settings.fetchExtra) return {state: 'disabled', hist: null, t: 0};
-    if (!appids.length) return {state: 'failed', hist: null, t: 0};
-    const parts = appids.map(getExtra);
-    if (parts.length === 1) return parts[0];
-    if (parts.some((part) => part.state === 'pending')) {
-      return {state: 'pending', hist: null, t: 0};
-    }
-    const loaded = parts.filter((part) => part.state === 'ok');
-    if (!loaded.length) return {state: 'failed', hist: null, t: 0};
-    return {
-      state: 'ok',
-      hist: combineHistograms(loaded.map((part) => part.hist)),
-      t: loaded.map((part) => part.t).join(','),
-      missing: parts.length - loaded.length,
-    };
+    return combineExtras(appids.map(getExtra));
   }
 
   // ===========================================================================
   // DOM helpers
   // ===========================================================================
+
+  /**
+   * Creates an element with attributes and children.
+   * @param {string} tag
+   * @param {!Object<string, string>=} props Attributes; "class" and "text"
+   *     set className and textContent respectively.
+   * @param {!Array<!Node|string>=} children
+   * @return {!HTMLElement}
+   */
+  function buildElement(tag, props = {}, children = []) {
+    const element = document.createElement(tag);
+    for (const [name, value] of Object.entries(props)) {
+      if (name === 'class') {
+        element.className = value;
+      } else if (name === 'text') {
+        element.textContent = value;
+      } else {
+        element.setAttribute(name, value);
+      }
+    }
+    element.append(...children);
+    return element;
+  }
 
   /**
    * @param {!Element} anchor
@@ -1096,7 +1416,7 @@
       if (element.childElementCount || isOwn(element)) continue;
       if (element.closest('button')) continue;
       if (exclude && exclude.contains(element)) continue;
-      texts.push(element.textContent);
+      texts.push(element.textContent || '');
     }
     return texts;
   }
@@ -1112,12 +1432,39 @@
   function readPrice(item, priceLinks, exclude) {
     for (const element of item.querySelectorAll('[aria-label]')) {
       if (isOwn(element)) continue;
-      const price = parsePriceLabel(element.getAttribute('aria-label'));
+      const price =
+          parsePriceLabel(element.getAttribute('aria-label'), currency);
       if (price) return price;
     }
     const linkTexts = priceLinks.flatMap((link) => leafTexts(link));
-    return parsePriceTexts(linkTexts) ||
-        parsePriceTexts(leafTexts(item, exclude));
+    return parsePriceTexts(linkTexts, currency) ||
+        parsePriceTexts(leafTexts(item, exclude), currency);
+  }
+
+  /**
+   * Store currency stated by the page: the store page declares it in its
+   * structured data; otherwise it is detected from the prices in the list.
+   * @param {!Element} listRoot
+   * @return {?string} Supported ISO 4217 code, null if the page shows none.
+   */
+  function pageCurrency(listRoot) {
+    const meta = document.querySelector('meta[itemprop="priceCurrency"]');
+    const declared = meta?.getAttribute('content')?.trim().toUpperCase();
+    if (declared && isSupportedCurrency(declared)) return declared;
+    /** @type {!Array<string>} */
+    const texts = [];
+    const walker = document.createTreeWalker(listRoot, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = (node.textContent || '').trim();
+      const parent = node.parentElement;
+      if (text.length > 24 || !parent || isOwn(parent)) continue;
+      if (parent.closest('script, style, button')) continue;
+      texts.push(text);
+    }
+    for (const element of listRoot.querySelectorAll('[aria-label]')) {
+      if (!isOwn(element)) texts.push(element.getAttribute('aria-label') || '');
+    }
+    return detectCurrency(texts);
   }
 
   /**
@@ -1126,10 +1473,12 @@
    */
   function commonAncestor(nodes) {
     let ancestor = nodes[0].parentElement;
-    while (ancestor && !nodes.every((node) => ancestor.contains(node))) {
+    while (ancestor) {
+      const candidate = ancestor;
+      if (nodes.every((node) => candidate.contains(node))) return candidate;
       ancestor = ancestor.parentElement;
     }
-    return ancestor || document.body;
+    return document.body;
   }
 
   // ===========================================================================
@@ -1231,7 +1580,8 @@
      * @return {!Element}
      */
     listRootOf(items) {
-      return items[0].parentElement?.parentElement || items[0].parentElement;
+      const parent = items[0].parentElement || document.body;
+      return parent.parentElement || parent;
     }
 
     /**
@@ -1241,10 +1591,12 @@
     readItem(row) {
       const links = [...row.querySelectorAll('a[href*="/app/"]')].filter(
           (link) => !isOwn(link));
-      const titleAnchor = links.find(
-          (link) => !link.querySelector('img, [aria-label]') &&
-              link.textContent.trim() &&
-              !CURRENCY_PATTERN.test(link.textContent));
+      const pattern = currencyPattern(currency);
+      const titleAnchor = links.find((link) => {
+        const text = link.textContent || '';
+        return !link.querySelector('img, [aria-label]') && text.trim() &&
+            !pattern.test(text);
+      });
       if (!titleAnchor) return null;
       let appid = appIdOf(titleAnchor);
       if (!appid) {
@@ -1259,8 +1611,9 @@
         kind: 'app',
         id: appid,
         appids: [appid],
-        title: titleAnchor.textContent.trim(),
+        title: (titleAnchor.textContent || '').trim(),
         anchorEl: titleAnchor,
+        focusEl: titleAnchor,
         price: readPrice(
             row, links.filter((link) => link !== titleAnchor), titleAnchor),
       };
@@ -1294,10 +1647,10 @@
       const button = head.closest('[role="button"]');
       if (button && this.heads(button).length === 1) return button;
       let element = head;
-      for (let depth = 0; depth < 8 && element.parentElement &&
-          this.heads(element.parentElement).length === 1;
-          depth++) {
-        element = element.parentElement;
+      for (let depth = 0; depth < 8; depth++) {
+        const parent = element.parentElement;
+        if (!parent || this.heads(parent).length !== 1) break;
+        element = parent;
       }
       return element;
     }
@@ -1332,7 +1685,7 @@
       if (name) {
         for (const element of item.querySelectorAll('*')) {
           if (!element.childElementCount && !element.closest('a') &&
-              !isOwn(element) && element.textContent.trim() === name) {
+              !isOwn(element) && (element.textContent || '').trim() === name) {
             return element;
           }
         }
@@ -1340,10 +1693,11 @@
       // Fallback: add/remove buttons reference the title via
       // aria-labelledby.
       for (const button of item.querySelectorAll('[aria-labelledby]')) {
-        const ids = button.getAttribute('aria-labelledby').trim().split(/\s+/);
+        const ids =
+            (button.getAttribute('aria-labelledby') || '').trim().split(/\s+/);
         const element = document.getElementById(ids[ids.length - 1]);
         if (element && element !== button && item.contains(element) &&
-            element.textContent.trim()) {
+            (element.textContent || '').trim()) {
           return element;
         }
       }
@@ -1368,15 +1722,20 @@
       if (kind !== 'app') {
         const links = [...item.querySelectorAll('a[href*="/app/"]')].filter(
             (link) => link !== head && !isOwn(link));
-        appids = [...new Set(links.map(appIdOf).filter(Boolean))];
+        appids = [...new Set(links.flatMap((link) => {
+          const appid = appIdOf(link);
+          return appid ? [appid] : [];
+        }))];
       }
       return {
         key: `${kind}/${id}`,
         kind,
         id,
         appids,
-        title: titleEl.textContent.trim(),
+        title: (titleEl.textContent || '').trim(),
         anchorEl: titleEl,
+        // The title is plain text; the head link leads to the same item.
+        focusEl: head,
         price: readPrice(item, [], titleEl),
         bundleSize: kind === 'app' ? 0 : appids.length,
       };
@@ -1416,6 +1775,7 @@
      * @return {!Array<!Offer>}
      */
     offers(scope) {
+      /** @type {!Array<!Offer>} */
       const offers = [];
       for (const block of scope.querySelectorAll(STORE_OFFER_SELECTOR)) {
         if (block.querySelector('input[name="bundleid"]')) continue;
@@ -1432,7 +1792,7 @@
      */
     heading(block) {
       const id = block.getAttribute('aria-labelledby');
-      const element = id && document.getElementById(id);
+      const element = id ? document.getElementById(id) : null;
       return element && block.contains(element) ?
           element :
           block.querySelector('h1, h2');
@@ -1507,7 +1867,7 @@
       if (item.matches(STORE_TITLE_SELECTOR)) {
         const anchorEl = this.firstChild(item);
         if (!anchorEl) return null;
-        const main = offers[0];
+        const main = offers.length ? offers[0] : null;
         return {
           key: `app/${appid}`,
           kind: 'app',
@@ -1515,16 +1875,19 @@
           appids: [appid],
           title: this.ownText(item),
           anchorEl,
+          // The title is not focusable, so the badge itself is.
+          focusEl: null,
           price: main ? main.price : null,
           bundleSize: 0,
-          notes: offers.length > 1 ?
+          notes: main && offers.length > 1 ?
               [`Offer: ${this.ownText(main.heading)}`] :
               [],
         };
       }
 
       const offer = offers.find((candidate) => candidate.block === item);
-      const anchorEl = offer && this.firstChild(offer.heading);
+      if (!offer) return null;
+      const anchorEl = this.firstChild(offer.heading);
       if (!anchorEl) return null;
       const subidInput = /** @type {?HTMLInputElement} */ (
           item.querySelector('input[name="subid"]'));
@@ -1537,6 +1900,7 @@
         appids: [appid],
         title: this.ownText(offer.heading),
         anchorEl,
+        focusEl: null,
         price: offer.price,
         bundleSize: 0,
       };
@@ -1556,28 +1920,59 @@
   // Tooltip (one shared element instead of native title tooltips)
   // ===========================================================================
 
+  // Mouse: hovering a badge shows its tooltip. Touch: tapping a badge toggles
+  // it. Keyboard: badges are no tab stops, so that a long list does not get
+  // an extra stop per row; instead the tooltip opens while the entry's title
+  // link has keyboard focus. Where the title is no link (store page), the
+  // badge itself is a focusable button.
+
   /**
-   * @type {!WeakMap<!Element, function(): !TooltipContent>} Builds the
-   *     tooltip content of each badge on demand.
+   * @type {!WeakMap<!Element, () => !TooltipContent>} Builds the tooltip
+   *     content of each badge on demand.
    */
   const tooltipBuilders = new WeakMap();
+  /**
+   * @type {!WeakMap<!Element, !Element>} Badge of each focusable title link.
+   */
+  const focusBadges = new WeakMap();
   /** @type {?HTMLElement} */
   let tooltipEl = null;
   /** @type {?Element} Badge the tooltip is shown or about to be shown for. */
   let tooltipBadge = null;
-  /** @type {?number} */
-  let tooltipTimer = null;
+  /**
+   * @type {?Element} Element described by the tooltip: the hovered or tapped
+   *     badge, or the focused element that opened it.
+   */
+  let tooltipOwner = null;
+  /** @type {number|undefined} */
+  let tooltipTimer = undefined;
   let lastPointerType = 'mouse';
+
+  /**
+   * @param {?EventTarget} target
+   * @return {?Element} The target, if it is an element.
+   */
+  function elementOf(target) {
+    const node = /** @type {?Node} */ (target);
+    return node && node.nodeType === Node.ELEMENT_NODE ?
+        /** @type {!Element} */ (node) :
+        null;
+  }
 
   /**
    * @param {?EventTarget} target
    * @return {?Element} Badge that contains the event target.
    */
   function badgeOf(target) {
-    const node = /** @type {?Node} */ (target);
-    return node && node.nodeType === Node.ELEMENT_NODE ?
-        /** @type {!Element} */ (node).closest(`.${PREFIX}-badge`) :
-        null;
+    return elementOf(target)?.closest(`.${PREFIX}-badge`) || null;
+  }
+
+  /**
+   * @param {!Element} badge
+   * @return {boolean} Whether the badge is a focusable button.
+   */
+  function isButtonBadge(badge) {
+    return badge.getAttribute('role') === 'button';
   }
 
   /** @return {boolean} */
@@ -1599,17 +1994,27 @@
     return tooltipEl;
   }
 
+  /** Removes the tooltip references from the current badge and owner. */
+  function releaseTooltipTarget() {
+    tooltipOwner?.removeAttribute('aria-describedby');
+    if (tooltipBadge && isButtonBadge(tooltipBadge)) {
+      tooltipBadge.setAttribute('aria-expanded', 'false');
+    }
+  }
+
   /**
    * @param {!Element} badge
    * @param {boolean} immediate Skip the hover delay.
+   * @param {!Element} owner Element the tooltip describes (see tooltipOwner).
    */
-  function showTooltip(badge, immediate) {
+  function showTooltip(badge, immediate, owner) {
     clearTimeout(tooltipTimer);
-    tooltipTimer = null;
-    if (tooltipBadge && tooltipBadge !== badge) {
-      tooltipBadge.removeAttribute('aria-describedby');
+    tooltipTimer = undefined;
+    if (tooltipBadge !== badge || tooltipOwner !== owner) {
+      releaseTooltipTarget();
     }
     tooltipBadge = badge;
+    tooltipOwner = owner;
     if (immediate) {
       renderTooltip();
     } else {
@@ -1625,8 +2030,14 @@
     const nodes = [buildElement(
         'div', {class: `${PREFIX}-tooltip-title`, text: content.title})];
     if (content.rows.length) {
+      /**
+       * @param {string} tag
+       * @param {string} text
+       * @param {string=} cls
+       * @return {!HTMLElement}
+       */
       const cell = (tag, text, cls = '') =>
-          buildElement(tag, cls ? {class: cls, text} : {text});
+        buildElement(tag, cls ? {class: cls, text} : {text});
       const num = `${PREFIX}-num`;
       nodes.push(buildElement('table', {class: `${PREFIX}-tooltip-table`}, [
         buildElement('thead', {}, [buildElement('tr', {}, [
@@ -1659,18 +2070,19 @@
 
   /** Fills and positions the tooltip for the current badge. */
   function renderTooltip() {
-    tooltipTimer = null;
+    tooltipTimer = undefined;
     const badge = tooltipBadge;
     const buildContent =
-        badge && badge.isConnected && tooltipBuilders.get(badge);
-    if (!buildContent) {
+        badge && badge.isConnected ? tooltipBuilders.get(badge) : undefined;
+    if (!badge || !buildContent) {
       hideTooltip();
       return;
     }
     const tooltip = tooltipElement();
     tooltip.replaceChildren(...buildTooltipNodes(buildContent()));
     tooltip.hidden = false;
-    badge.setAttribute('aria-describedby', tooltip.id);
+    tooltipOwner?.setAttribute('aria-describedby', tooltip.id);
+    if (isButtonBadge(badge)) badge.setAttribute('aria-expanded', 'true');
     positionTooltip(tooltip, badge);
   }
 
@@ -1699,12 +2111,23 @@
 
   /** Hides the tooltip and cancels a pending show. */
   function hideTooltip() {
-    if (!tooltipBadge && !tooltipTimer) return;
+    if (!tooltipBadge && tooltipTimer === undefined) return;
     clearTimeout(tooltipTimer);
-    tooltipTimer = null;
-    tooltipBadge?.removeAttribute('aria-describedby');
+    tooltipTimer = undefined;
+    releaseTooltipTarget();
     tooltipBadge = null;
+    tooltipOwner = null;
     if (tooltipEl) tooltipEl.hidden = true;
+  }
+
+  /**
+   * @param {!Element} element Element that received focus.
+   * @return {?Element} Badge whose tooltip the focus opens: the element
+   *     itself if it is a badge, or the badge of a title link.
+   */
+  function focusedBadge(element) {
+    const badge = badgeOf(element) || focusBadges.get(element);
+    return badge && badge.isConnected ? badge : null;
   }
 
   /** Registers the delegated event listeners (once for the whole page). */
@@ -1716,7 +2139,7 @@
       const badge = badgeOf(event.target);
       if (badge === tooltipBadge) return;
       if (badge) {
-        showTooltip(badge, isTooltipVisible());
+        showTooltip(badge, isTooltipVisible(), badge);
       } else {
         hideTooltip();
       }
@@ -1739,25 +2162,44 @@
       if (badge === tooltipBadge) {
         hideTooltip();
       } else {
-        showTooltip(badge, true);
+        showTooltip(badge, true, badge);
       }
     }, true);
     document.addEventListener('focusin', (event) => {
-      // Only keyboard focus: clicks and taps focus the badge as well, but are
-      // handled by the pointer listeners.
-      const badge = badgeOf(event.target);
-      if (badge && badge.matches(':focus-visible')) showTooltip(badge, true);
+      // Only keyboard focus: clicks and taps focus links and badges as well,
+      // but are handled by the pointer listeners.
+      const element = elementOf(event.target);
+      const badge = element && focusedBadge(element);
+      if (element && badge && element.matches(':focus-visible')) {
+        showTooltip(badge, true, element);
+      }
     });
     document.addEventListener('focusout', (event) => {
-      if (badgeOf(event.target) === tooltipBadge) hideTooltip();
+      if (event.target === tooltipOwner) hideTooltip();
     });
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') hideTooltip();
-    }, passive);
+      if (event.key === 'Escape') {
+        hideTooltip();
+        return;
+      }
+      // A focused badge button toggles its tooltip.
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      const badge = elementOf(event.target);
+      if (!badge || !badge.matches(`.${PREFIX}-badge`) ||
+          !isButtonBadge(badge)) {
+        return;
+      }
+      event.preventDefault();
+      if (badge === tooltipBadge && isTooltipVisible()) {
+        hideTooltip();
+      } else {
+        showTooltip(badge, true, badge);
+      }
+    });
     window.addEventListener('scroll', () => {
-      // Focusing a badge scrolls it into view: keep its tooltip in place.
-      if (tooltipBadge && tooltipBadge === document.activeElement &&
-          isTooltipVisible()) {
+      // Focusing an element scrolls it into view: keep its tooltip in place.
+      if (tooltipBadge && tooltipOwner &&
+          tooltipOwner === document.activeElement && isTooltipVisible()) {
         positionTooltip(tooltipElement(), tooltipBadge);
       } else {
         hideTooltip();
@@ -1770,16 +2212,11 @@
   // Top list panel (wishlist only)
   // ===========================================================================
 
-  // The wishlist is virtualized: only the rows near the viewport exist. The
-  // panel therefore collects every scored row seen while scrolling. Entries
-  // are dropped again when another game takes over their list position
-  // (removed from the wishlist, list re-sorted) and all at once when the list
-  // is replaced or the URL changes (filters, another wishlist).
+  // The entries are kept in a TopList (see there); all of them are dropped
+  // when the list is replaced or the URL changes (filters, another
+  // wishlist).
 
-  /** @type {!Map<string, !TopEntry>} Scored entries seen so far, by key. */
-  const topEntries = new Map();
-  /** @type {!Map<number, string>} Key last seen at each list position. */
-  const keyAtPosition = new Map();
+  const topList = new TopList();
   const topListEnabled = page instanceof WishlistPage;
   let topListDirty = false;
   let topListVersion = 0;
@@ -1793,11 +2230,11 @@
   let panelSig = '';
 
   /**
-   * @param {?Object} raw
+   * @param {*} raw
    * @return {!PanelPrefs}
    */
   function sanitizePanelPrefs(raw) {
-    const input = raw || {};
+    const input = raw && typeof raw === 'object' ? raw : {};
     return {
       size: CONFIG.topListSizes.includes(input.size) ?
           input.size :
@@ -1814,29 +2251,19 @@
   /** Forgets all entries, e.g. when the list was replaced. */
   function resetTopList() {
     if (!topListEnabled) return;
-    topEntries.clear();
-    keyAtPosition.clear();
+    topList.clear();
     topListEpoch++;
     topListDirty = true;
   }
 
   /**
-   * Records which entry is shown at a list position. An entry whose position
-   * is taken over by another one was removed or has moved; it is dropped
-   * until its row is rendered again.
+   * Records which entry is shown at a list position.
    * @param {string} key
    * @param {?number} position
    */
   function notePosition(key, position) {
     if (!topListEnabled || position == null) return;
-    const previous = keyAtPosition.get(position);
-    if (previous === key) return;
-    keyAtPosition.set(position, key);
-    const displaced = previous && topEntries.get(previous);
-    if (displaced && displaced.position === position) {
-      topEntries.delete(previous);
-      topListDirty = true;
-    }
+    if (topList.notePosition(key, position)) topListDirty = true;
   }
 
   /**
@@ -1848,36 +2275,21 @@
    */
   function rememberTopEntry(data, position, extra, result) {
     if (!topListEnabled) return;
-    if (result.status === 'ok' && extra.state !== 'pending') {
-      topEntries.set(data.key, {
+    if (result.status === 'ok' && data.price && extra.state !== 'pending') {
+      topList.set({
         key: data.key,
         appid: data.id,
         title: data.title,
-        price: /** @type {!Price} */ (data.price),
+        price: data.price,
         hist: extra.hist,
-        score: /** @type {number} */ (result.score),
+        score: result.score,
         version: settingsVersion,
         position,
       });
     } else {
-      topEntries.delete(data.key);
+      topList.delete(data.key);
     }
     topListDirty = true;
-  }
-
-  /** Recomputes the scores of entries that are no longer rendered. */
-  function rescoreTopEntries() {
-    for (const entry of topEntries.values()) {
-      if (entry.version === settingsVersion) continue;
-      const hist = settings.fetchExtra ? entry.hist : null;
-      const result = computeScore(entry, hist, settings);
-      if (result.status === 'ok') {
-        entry.score = /** @type {number} */ (result.score);
-        entry.version = settingsVersion;
-      } else {
-        topEntries.delete(entry.key);
-      }
-    }
   }
 
   /** Updates the panel if entries, settings or preferences changed. */
@@ -1886,16 +2298,15 @@
     if (!topListDirty && topListVersion === settingsVersion) return;
     topListDirty = false;
     if (topListVersion !== settingsVersion) {
-      rescoreTopEntries();
+      topList.rescore(settings, settingsVersion);
       topListVersion = settingsVersion;
     }
-    const ranked = [...topEntries.values()]
-        .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
-        .slice(0, panelPrefs.size);
+    const ranked = topList.ranked(panelPrefs.size);
     const sig = [
-      topEntries.size,
+      topList.size,
       panelPrefs.size,
       panelPrefs.collapsed,
+      currency,
       ...ranked.map((entry) => `${entry.key}:${entry.score}`),
     ].join('|');
     if (sig === panelSig && panelEl?.isConnected) return;
@@ -1908,6 +2319,27 @@
     GM_setValue(STORAGE_PANEL, panelPrefs);
     topListDirty = true;
     updateTopList();
+  }
+
+  /**
+   * Takes over preferences saved in another tab.
+   * @param {*} value
+   */
+  function applyRemotePanelPrefs(value) {
+    Object.assign(panelPrefs, sanitizePanelPrefs(value));
+    topListDirty = true;
+    updateTopList();
+  }
+
+  /**
+   * @param {!Element} scope
+   * @param {string} selector
+   * @return {!HTMLElement} The element, which our own markup always has.
+   */
+  function ownElement(scope, selector) {
+    const element = scope.querySelector(selector);
+    if (!element) throw new Error(`Missing ${selector}`);
+    return /** @type {!HTMLElement} */ (element);
   }
 
   /** @return {!HTMLElement} The panel element, created on first use. */
@@ -1955,7 +2387,7 @@
    */
   function formatPanelPrice(price) {
     if (price.free) return 'Free';
-    const amount = formatMoney(price.final);
+    const amount = formatMoney(price.final, currency);
     return price.discount > 0 ? `${amount} · −${price.discount}%` : amount;
   }
 
@@ -1965,19 +2397,18 @@
    */
   function renderPanel(ranked) {
     const panel = panelElement();
-    panel.hidden = topEntries.size === 0;
-    const toggle = panel.querySelector(`.${PREFIX}-panel-toggle`);
+    panel.hidden = topList.size === 0;
+    const toggle = ownElement(panel, `.${PREFIX}-panel-toggle`);
     toggle.textContent = `${panelPrefs.collapsed ? '▸' : '▾'} Top deals`;
     toggle.setAttribute('aria-expanded', String(!panelPrefs.collapsed));
     const sizeSelect = /** @type {!HTMLSelectElement} */ (
-        panel.querySelector(`.${PREFIX}-panel-size`));
+      ownElement(panel, `.${PREFIX}-panel-size`));
     sizeSelect.value = String(panelPrefs.size);
-    const body = /** @type {!HTMLElement} */ (
-        panel.querySelector(`.${PREFIX}-panel-body`));
+    const body = ownElement(panel, `.${PREFIX}-panel-body`);
     body.hidden = panelPrefs.collapsed;
     if (panelPrefs.collapsed) return;
 
-    panel.querySelector(`.${PREFIX}-panel-list`).replaceChildren(
+    ownElement(panel, `.${PREFIX}-panel-list`).replaceChildren(
         ...ranked.map((entry) => {
           const pill = buildElement(
               'span', {class: `${PREFIX}-pill`, text: String(entry.score)});
@@ -1999,26 +2430,39 @@
             ]),
           ]);
         }));
-    const noun = topEntries.size === 1 ? 'title' : 'titles';
-    panel.querySelector(`.${PREFIX}-panel-foot`).textContent =
-        `${formatInteger(topEntries.size)} ${noun} scored so far – ` +
+    const noun = topList.size === 1 ? 'title' : 'titles';
+    ownElement(panel, `.${PREFIX}-panel-foot`).textContent =
+        `${formatInteger(topList.size)} ${noun} scored so far – ` +
         'scroll through the wishlist to include more.';
   }
 
   // ===========================================================================
-  // Badges (React nodes are never modified, only our own elements inserted)
+  // Badges (only our own elements are inserted; the page's nodes are left as
+  // they are, except for aria-describedby on a title link while its tooltip
+  // is open)
   // ===========================================================================
 
   /** @type {!WeakMap<!Element, !ItemData>} Parsed data per entry. */
   let itemCache = new WeakMap();
 
-  /** @return {!HTMLElement} */
-  function createBadge() {
+  /** Extra data of an entry without a price: it gets no score anyway. */
+  const UNUSED_EXTRA = Object.freeze({state: 'unused', hist: null, t: 0});
+
+  /**
+   * @param {boolean} focusable Whether the badge is a focusable button (when
+   *     the entry has no focusable title link).
+   * @return {!HTMLElement}
+   */
+  function createBadge(focusable) {
     const badge = document.createElement('span');
     badge.className = `${PREFIX}-badge`;
-    badge.setAttribute('role', 'img');
-    // Focusable, so that keyboard users can open the tooltip.
-    badge.tabIndex = 0;
+    if (focusable) {
+      badge.setAttribute('role', 'button');
+      badge.setAttribute('aria-expanded', 'false');
+      badge.tabIndex = 0;
+    } else {
+      badge.setAttribute('role', 'img');
+    }
     const pill = document.createElement('span');
     pill.className = `${PREFIX}-pill`;
     badge.appendChild(pill);
@@ -2057,10 +2501,12 @@
     pill.classList.toggle(
         `${PREFIX}-noreviews`, result.status === 'ok' && !result.hasReviews);
     // The breakdown is only built when the tooltip is actually shown.
+    const storeCurrency = currency;
     tooltipBuilders.set(badge, () => buildTooltip(result, extra.state, {
       bundleSize: data.bundleSize,
       bundleMissing: extra.missing || 0,
       notes: data.notes,
+      currency: storeCurrency,
     }));
     badge.setAttribute('aria-label', label);
     if (badge === tooltipBadge && isTooltipVisible()) renderTooltip();
@@ -2091,7 +2537,7 @@
     // mutation inside the entry invalidates it.
     let data = itemCache.get(item);
     if (!data || !item.contains(data.anchorEl)) {
-      data = page.readItem(item);
+      data = page.readItem(item) || undefined;
       if (!data) {
         itemCache.delete(item);
         return;
@@ -2099,6 +2545,8 @@
       itemCache.set(item, data);
     }
     const anchor = data.anchorEl;
+    const parent = anchor.parentNode;
+    if (!parent) return;
     const position = page.positionOf(item);
     notePosition(data.key, position);
 
@@ -2107,10 +2555,12 @@
     for (let i = 1; i < badges.length; i++) {
       badges[i].remove();
     }
-    const badge = /** @type {!HTMLElement} */ (badges[0] || createBadge());
+    const badge = /** @type {!HTMLElement} */ (
+      badges[0] || createBadge(!data.focusEl));
     if (badge.nextSibling !== anchor) {
-      anchor.parentNode.insertBefore(badge, anchor);
+      parent.insertBefore(badge, anchor);
     }
+    if (data.focusEl) focusBadges.set(data.focusEl, badge);
     if (badge.dataset.key !== data.key) {
       badge.dataset.key = data.key;
       delete badge.dataset.sig;
@@ -2119,7 +2569,8 @@
     // Set before getExtraFor: the queue checks for it.
     setData(badge, 'appids', data.appids.join(' '));
 
-    const extra = getExtraFor(data.appids);
+    // Without a price there is no score, so the histogram is not requested.
+    const extra = data.price ? getExtraFor(data.appids) : UNUSED_EXTRA;
     const sig = [
       data.key,
       data.appids.join(','),
@@ -2137,18 +2588,18 @@
     rememberTopEntry(data, position, extra, result);
     if (report) {
       const hist = extra.hist;
-      const reviews = hist ? hist.upTotal + hist.downTotal : null;
+      const reviews = hist ? hist.upTotal + hist.downTotal : 0;
       report.push({
         item: data.key,
         title: data.title,
-        reviews,
-        positive: reviews ? hist.upTotal / reviews : null,
+        reviews: hist ? reviews : null,
+        positive: hist && reviews ? hist.upTotal / reviews : null,
         recent30: hist ? hist.up30 + hist.down30 : null,
         discount: data.price?.discount ?? null,
         original: data.price?.original ?? null,
         final: data.price?.final ?? null,
         extra: extra.state,
-        score: result.score ?? null,
+        score: result.status === 'ok' ? result.score : null,
       });
     }
   }
@@ -2183,6 +2634,12 @@
   let fullScanNeeded = true;
   /** Page URL without hash, to notice navigation within the app. */
   let lastUrl = location.pathname + location.search;
+  /** Time of the last search for the list (see CONFIG.searchIntervalMs). */
+  let lastSearchAt = -Infinity;
+  /** Time of the last attempt to detect the currency. */
+  let lastDetectAt = -Infinity;
+  /** @type {number|undefined} Pending tick after a throttled search. */
+  let searchTimer = undefined;
 
   /**
    * @param {!Node} node
@@ -2274,6 +2731,50 @@
   }
 
   /**
+   * Runs a tick after a delay, unless one is already pending.
+   * @param {number} ms
+   */
+  function scheduleAfter(ms) {
+    if (searchTimer !== undefined) return;
+    searchTimer = setTimeout(() => {
+      searchTimer = undefined;
+      schedule();
+    }, ms);
+  }
+
+  /**
+   * Switches the store currency: prices read so far are read again, and the
+   * badges and the top list are redrawn.
+   * @param {string} code Supported ISO 4217 code.
+   */
+  function setCurrency(code) {
+    if (code === currency) return;
+    log('Currency', code);
+    currency = code;
+    itemCache = new WeakMap();
+    fullScanNeeded = true;
+    settingsVersion++;
+    resetTopList();
+  }
+
+  /**
+   * Detects the store currency from the page once, if the settings leave it
+   * to the page. Until then the last detected currency is used.
+   * @param {!Element} root List root.
+   */
+  function refreshCurrency(root) {
+    if (currencySettled) return;
+    const now = Date.now();
+    if (now - lastDetectAt < CONFIG.searchIntervalMs) return;
+    lastDetectAt = now;
+    const code = pageCurrency(root);
+    if (!code) return;
+    currencySettled = true;
+    GM_setValue(STORAGE_CURRENCY, code);
+    setCurrency(code);
+  }
+
+  /**
    * Finds the list, observes it and updates all entries. Only new or changed
    * entries are read again; the others just re-check their extra data.
    */
@@ -2284,13 +2785,24 @@
       lastUrl = url;
       resetTopList();
     }
-    if (!listRoot || replaced) {
-      const items = page.findItems(document);
-      listRoot = items.length ? page.listRootOf(items) : null;
-      fullScanNeeded = true;
+    if (replaced) listRoot = null;
+    if (!listRoot) {
+      // Searching the whole page is expensive and a page without a list
+      // (e.g. an empty wishlist) keeps changing: search at most every
+      // CONFIG.searchIntervalMs.
+      const wait = lastSearchAt + CONFIG.searchIntervalMs - Date.now();
+      if (wait > 0) {
+        scheduleAfter(wait);
+      } else {
+        lastSearchAt = Date.now();
+        const items = page.findItems(document);
+        listRoot = items.length ? page.listRootOf(items) : null;
+        fullScanNeeded = true;
+      }
     }
     observe(listRoot || document.body);
     if (listRoot) {
+      refreshCurrency(listRoot);
       if (fullScanNeeded) {
         if (!page.independentItems) itemCache = new WeakMap();
         knownItems = new Set(page.findItems(listRoot));
@@ -2547,7 +3059,8 @@
         font-variant-numeric: tabular-nums;
       }
       .${PREFIX}-hint { display: block; color: #8f98a0; font-size: 12px; }
-      .${PREFIX}-dialog input[type="number"] {
+      .${PREFIX}-dialog input[type="number"],
+      .${PREFIX}-dialog select {
         box-sizing: border-box;
         width: 100%;
         padding: 3px 6px;
@@ -2588,49 +3101,28 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  /** Weights in the dialog: [key, label]. */
-  const WEIGHT_FIELDS = deepFreeze([
-    ['overall', 'Overall rating'],
-    ['recent', 'Last 30 days'],
-    ['discount', 'Discount'],
-    ['price', 'Price'],
-    ['popularity', 'Popularity'],
-  ]);
-
-  /**
-   * Creates an element with attributes and children.
-   * @param {string} tag
-   * @param {!Object<string, string>=} props Attributes; "class" and "text"
-   *     set className and textContent respectively.
-   * @param {!Array<!Node|string>=} children
-   * @return {!HTMLElement}
-   */
-  function buildElement(tag, props = {}, children = []) {
-    const element = document.createElement(tag);
-    for (const [name, value] of Object.entries(props)) {
-      if (name === 'class') {
-        element.className = value;
-      } else if (name === 'text') {
-        element.textContent = value;
-      } else {
-        element.setAttribute(name, value);
-      }
-    }
-    element.append(...children);
-    return element;
-  }
+  /** Weights in the dialog. */
+  const WEIGHT_FIELDS =
+      /** @type {!ReadonlyArray<{key: keyof Weights, label: string}>} */ (
+        deepFreeze([
+          {key: 'overall', label: 'Overall rating'},
+          {key: 'recent', label: 'Last 30 days'},
+          {key: 'discount', label: 'Discount'},
+          {key: 'price', label: 'Price'},
+          {key: 'popularity', label: 'Popularity'},
+        ]));
 
   /**
    * @param {string} id
-   * @param {string} label
+   * @param {!Array<!Node|string>} label
    * @param {string} hint
    * @param {!Element} input
-   * @return {!HTMLElement} Row with an input field.
+   * @return {!HTMLElement} Row with an input field or select.
    */
-  function buildNumberRow(id, label, hint, input) {
+  function buildInputRow(id, label, hint, input) {
     return buildElement('div', {class: `${PREFIX}-row`}, [
       buildElement('label', {for: id}, [
-        label,
+        ...label,
         buildElement('span', {class: `${PREFIX}-hint`, text: hint}),
       ]),
       input,
@@ -2667,6 +3159,45 @@
     };
   }
 
+  /**
+   * @param {!HTMLFormElement} form
+   * @param {string} name
+   * @return {!HTMLInputElement} The form's input with that name.
+   */
+  function inputOf(form, name) {
+    return /** @type {!HTMLInputElement} */ (form.elements.namedItem(name));
+  }
+
+  /**
+   * @param {!HTMLFormElement} form
+   * @return {!HTMLSelectElement} The currency select.
+   */
+  function currencySelectOf(form) {
+    return /** @type {!HTMLSelectElement} */ (
+      form.elements.namedItem('currency'));
+  }
+
+  /**
+   * Applies new settings: redraws all badges and adopts the currency.
+   * @param {!Settings} next
+   */
+  function applySettings(next) {
+    const wasAuto = settings.currency === 'auto';
+    settings = next;
+    if (next.currency !== 'auto') {
+      currencySettled = true;
+      setCurrency(next.currency);
+    } else if (!wasAuto) {
+      // Detect again; until then use the last detected currency.
+      currencySettled = false;
+      lastDetectAt = -Infinity;
+      setCurrency(storedCurrency());
+    }
+    settingsVersion++;
+    pump();
+    schedule();
+  }
+
   /** @return {!HTMLDialogElement} */
   function buildSettingsDialog() {
     const dialog = /** @type {!HTMLDialogElement} */ (buildElement('dialog', {
@@ -2675,12 +3206,12 @@
       'aria-labelledby': `${PREFIX}-title`,
     }));
     const form = /** @type {!HTMLFormElement} */ (
-        buildElement('form', {method: 'dialog'}));
+      buildElement('form', {method: 'dialog'}));
 
     const weights = buildElement('fieldset', {}, [
       buildElement('legend', {text: 'Weights (normalized automatically)'}),
     ]);
-    for (const [key, label] of WEIGHT_FIELDS) {
+    for (const {key, label} of WEIGHT_FIELDS) {
       const id = `${PREFIX}-w-${key}`;
       weights.append(buildElement('div', {class: `${PREFIX}-row`}, [
         buildElement('label', {for: id, text: label}),
@@ -2695,10 +3226,23 @@
       ]));
     }
 
+    const currencySelect = buildElement(
+        'select', {id: `${PREFIX}-currency`, name: 'currency'}, [
+          buildElement('option', {'value': 'auto', 'data-auto': ''}),
+          ...Object.keys(TEXT.currencyPatterns).map(
+              (code) => buildElement('option', {value: code, text: code})),
+        ]);
     const other = buildElement('fieldset', {}, [
       buildElement('legend', {text: 'Other settings'}),
-      buildNumberRow(
-          `${PREFIX}-ref`, `Reference price (${CURRENCY_SYMBOL})`,
+      buildInputRow(
+          `${PREFIX}-currency`, ['Store currency'],
+          'Prices in other currencies get no score.', currencySelect),
+      buildInputRow(
+          `${PREFIX}-ref`, [
+            'Reference price (',
+            buildElement('span', {'data-ref-symbol': ''}),
+            ')',
+          ],
           'At this final price the price component is 50.',
           buildElement('input', {
             id: `${PREFIX}-ref`,
@@ -2743,7 +3287,7 @@
         status);
     dialog.append(form);
 
-    form.addEventListener('input', () => updateShares(form));
+    form.addEventListener('input', () => updateForm(form));
     cancelButton.addEventListener('click', () => dialog.close());
     defaultsButton.addEventListener('click', () => {
       writeForm(form, defaultSettings());
@@ -2761,11 +3305,9 @@
     form.addEventListener('submit', (event) => {
       event.preventDefault();
       if (!form.reportValidity()) return;
-      settings = sanitizeSettings(readForm(form));
-      GM_setValue(STORAGE_SETTINGS, settings);
-      settingsVersion++;
-      pump();
-      schedule();
+      const next = sanitizeSettings(readForm(form));
+      GM_setValue(STORAGE_SETTINGS, next);
+      applySettings(next);
       dialog.close();
     });
     return dialog;
@@ -2776,13 +3318,14 @@
    * @param {!Settings} values
    */
   function writeForm(form, values) {
-    for (const [key] of WEIGHT_FIELDS) {
-      form.elements[`w.${key}`].value = values.weights[key];
+    for (const {key} of WEIGHT_FIELDS) {
+      inputOf(form, `w.${key}`).value = String(values.weights[key]);
     }
-    form.elements['referencePrice'].value = values.referencePrice;
-    form.elements['fetchExtra'].checked = values.fetchExtra;
-    form.elements['qualityPenalty'].checked = values.qualityPenalty;
-    updateShares(form);
+    currencySelectOf(form).value = values.currency;
+    inputOf(form, 'referencePrice').value = String(values.referencePrice);
+    inputOf(form, 'fetchExtra').checked = values.fetchExtra;
+    inputOf(form, 'qualityPenalty').checked = values.qualityPenalty;
+    updateForm(form);
   }
 
   /**
@@ -2790,44 +3333,55 @@
    * @return {!Object} Raw values, not yet validated.
    */
   function readForm(form) {
+    /** @type {!Object<string, string>} */
     const weights = {};
-    for (const [key] of WEIGHT_FIELDS) {
-      weights[key] = form.elements[`w.${key}`].value;
+    for (const {key} of WEIGHT_FIELDS) {
+      weights[key] = inputOf(form, `w.${key}`).value;
     }
     return {
       weights,
-      referencePrice: form.elements['referencePrice'].value,
-      fetchExtra: form.elements['fetchExtra'].checked,
-      qualityPenalty: form.elements['qualityPenalty'].checked,
+      referencePrice: inputOf(form, 'referencePrice').value,
+      fetchExtra: inputOf(form, 'fetchExtra').checked,
+      qualityPenalty: inputOf(form, 'qualityPenalty').checked,
+      currency: currencySelectOf(form).value,
     };
   }
 
   /**
-   * Shows each weight's share of the total.
+   * Shows each weight's share of the total, the currently used currency of
+   * the automatic choice and the symbol of the selected currency.
    * @param {!HTMLFormElement} form
    */
-  function updateShares(form) {
-    const values = WEIGHT_FIELDS.map(
-        ([key]) => Math.max(0, Number(form.elements[`w.${key}`].value) || 0));
+  function updateForm(form) {
+    const values = WEIGHT_FIELDS.map(({key}) =>
+      Math.max(0, Number(inputOf(form, `w.${key}`).value) || 0));
     const total = values.reduce((sum, value) => sum + value, 0);
-    WEIGHT_FIELDS.forEach(([key], index) => {
-      const share = form.querySelector(`[data-share="${key}"]`);
-      share.textContent =
+    WEIGHT_FIELDS.forEach(({key}, index) => {
+      ownElement(form, `[data-share="${key}"]`).textContent =
           total ? `${Math.round((values[index] / total) * 100)}%` : '–';
     });
+    const autoCurrency = settings.currency === 'auto' ?
+        currency :
+        storedCurrency();
+    ownElement(form, '[data-auto]').textContent =
+        `Automatic (${autoCurrency})`;
+    const selected = currencySelectOf(form).value;
+    ownElement(form, '[data-ref-symbol]').textContent = currencySymbol(
+        selected === 'auto' ? autoCurrency : selected);
   }
 
   /** Opens the settings dialog. */
   function openSettings() {
     let dialog = /** @type {?HTMLDialogElement} */ (
-        document.getElementById(`${PREFIX}-settings`));
+      document.getElementById(`${PREFIX}-settings`));
     if (!dialog) {
       dialog = buildSettingsDialog();
       document.body.appendChild(dialog);
     }
-    const form = /** @type {!HTMLFormElement} */ (dialog.querySelector('form'));
+    const form = /** @type {!HTMLFormElement} */ (
+      ownElement(dialog, 'form'));
     writeForm(form, settings);
-    form.querySelector(`.${PREFIX}-status`).textContent = '';
+    ownElement(form, `.${PREFIX}-status`).textContent = '';
     dialog.showModal();
   }
 
@@ -2840,8 +3394,17 @@
     injectStyles();
     initTooltip();
     const pruned = cachePrune(false);
-    if (pruned) log(`Removed ${pruned} expired cache entries`);
+    if (pruned) log(`Removed ${pruned} expired or outdated cache entries`);
     GM_registerMenuCommand('Deal Score: Settings …', openSettings);
+    // Changes saved in another tab.
+    GM_addValueChangeListener(STORAGE_SETTINGS, (name, oldValue, newValue,
+        remote) => {
+      if (remote) applySettings(sanitizeSettings(newValue));
+    });
+    GM_addValueChangeListener(STORAGE_PANEL, (name, oldValue, newValue,
+        remote) => {
+      if (remote && topListEnabled) applyRemotePanelPrefs(newValue);
+    });
     observe(document.body);
     schedule();
     if (DEBUG) {

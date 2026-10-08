@@ -4,7 +4,7 @@
   "description": "Personal userscripts for Violentmonkey",
   "scripts": {
     "test": "node --test",
-    "test:e2e": "node --test tests/e2e/reading-ruler.e2e.js",
+    "test:e2e": "node --test tests/e2e/reading-ruler.e2e.js tests/e2e/steam-dealscore.e2e.js",
     "typecheck": "npx -p typescript tsc -p jsconfig.json"
   },
   "devDependencies": {
