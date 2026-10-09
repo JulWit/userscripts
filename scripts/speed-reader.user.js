@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.3.3
+// @version      1.3.4
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -323,8 +323,12 @@
     const following = next.replace(OPENING_PATTERN, '');
     if (/^[\p{Ll}\d]/u.test(following)) return false;
     const word = text.replace(OPENING_PATTERN, '');
-    // Not the English "I", which often ends a sentence ("than I.").
-    if (/^(?:\p{L}\.)+$/u.test(word) && word !== 'I.') return false;
+    // Not the English "I" and the times of day "a.m." and "p.m.", which often
+    // end a sentence ("than I.", "at 5 p.m.").
+    if (/^(?:\p{L}\.)+$/u.test(word) && word !== 'I.' &&
+        !/^[ap]\.m\.$/i.test(word)) {
+      return false;
+    }
     const stem = word.slice(0, -1).toLowerCase();
     if (CONFIG.abbreviations.includes(stem)) return false;
     if (/^\d{1,2}(?:\.\d{1,2})?$/.test(stem)) {
@@ -339,7 +343,9 @@
   /**
    * The pause after a word inside a paragraph, from its punctuation (see
    * endsSentenceAtPeriod for periods). Closing quotes and brackets are
-   * ignored.
+   * ignored. An exclamation or question mark or an ellipsis before a
+   * lower-case word ("„Halt!“ rief er", "wartete … und") ends no sentence,
+   * but gets the pause of a clause.
    * @param {string} word
    * @param {string=} previous The word before, '' at the paragraph start.
    * @param {string=} next The word after, '' at the paragraph end.
@@ -347,7 +353,11 @@
    */
   function pauseAfter(word, previous = '', next = '') {
     const text = word.replace(CLOSING_PATTERN, '');
-    if (/[!?…]$/.test(text)) return 'sentence';
+    if (/(?:[!?…]|\.\.\.)$/.test(text)) {
+      return /^\p{Ll}/u.test(next.replace(OPENING_PATTERN, '')) ?
+          'clause' :
+          'sentence';
+    }
     if (text.endsWith('.')) {
       return endsSentenceAtPeriod(text, previous, next) ? 'sentence' : '';
     }

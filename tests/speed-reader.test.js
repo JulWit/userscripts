@@ -112,6 +112,20 @@ describe('pauseAfter', () => {
     assert.equal(core.pauseAfter('end.', 'the', '"and'), '');
   });
 
+  it('pauses briefly where a sentence goes on after ! ? or …', () => {
+    assert.equal(core.pauseAfter('Halt!“', '„Komm', 'rief'), 'clause');
+    assert.equal(core.pauseAfter('Wow!', '', 'that'), 'clause');
+    assert.equal(core.pauseAfter('wartete…', 'Er', 'und'), 'clause');
+    assert.equal(core.pauseAfter('waited...', 'He', 'and'), 'clause');
+    assert.equal(core.pauseAfter('waited...', 'He', 'Then'), 'sentence');
+    assert.equal(core.pauseAfter('Wirklich?', '', '„Ja'), 'sentence');
+  });
+
+  it('ends a sentence after a.m. and p.m. before a capital letter', () => {
+    assert.equal(core.pauseAfter('p.m.', '5', 'Then'), 'sentence');
+    assert.equal(core.pauseAfter('a.m.', '9', 'and'), '');
+  });
+
   it('ends no sentence after single letters (z. B., initials)', () => {
     assert.equal(core.pauseAfter('z.', 'kaufen', 'B.'), '');
     assert.equal(core.pauseAfter('B.', 'z.', 'Äpfel'), '');
