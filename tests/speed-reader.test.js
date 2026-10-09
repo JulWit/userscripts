@@ -358,6 +358,12 @@ describe('keyAction', () => {
     assert.equal(core.keyAction('ArrowLeft', 'text', false), '');
     assert.equal(core.keyAction('ArrowLeft', 'other', true), '');
   });
+
+  it('closes on Escape, also in text fields', () => {
+    assert.equal(core.keyAction('Escape', 'other', false), 'close');
+    assert.equal(core.keyAction('Escape', 'text', false), 'close');
+    assert.equal(core.keyAction('Escape', 'other', true), '');
+  });
 });
 
 describe('fitWord', () => {

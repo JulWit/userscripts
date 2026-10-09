@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.0.0
-// @description  Shows the text of a page (or the selected text) word by word in a reader window (RSVP), with adjustable speed and font size
+// @version      1.1.0
+// @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
 // @supportURL   https://github.com/JulWit/userscripts/issues
@@ -21,13 +21,14 @@
 /**
  * @fileoverview Speed reader (Rapid Serial Visual Presentation): shows the
  * main text of a page, or the selected text, one word at a time at the same
- * place in a window of its own, so the eyes do not have to move. Each word
+ * place in an overlay on the page, so the eyes do not have to move. Each word
  * is aligned at its fixation letter (optimal recognition point), which is
  * highlighted and stays at the same horizontal position. Words are shown
  * longer after punctuation, at the end of paragraphs and after headings.
  * The script registers a menu command and does nothing else until it is
- * used. The reader window is built by this script in an empty document and
- * driven from the page that opened it, so it closes with that page.
+ * used. The reader is an overlay in a shadow root on the page rather than a
+ * window of its own, which pop-up blockers would stop: script manager menu
+ * commands do not count as user actions in the page.
  * Known limitations: text in iframes and in shadow DOM (web components) is
  * not read.
  * Code style: Google JavaScript Style Guide, Google HTML/CSS Style Guide.
@@ -164,7 +165,10 @@
     maxLag: 1000,
     // Below this window width the buttons show icons only.
     compactWidth: 420,
-    window: {width: 760, height: 540},
+    // Size of the reader panel in px. Below fullScreenWidth it fills the
+    // window.
+    panel: {maxWidth: 760, minHeight: 540},
+    fullScreenWidth: 600,
     storageSettings: 'settings',
 
     // Content detection, as in the Reading Ruler.
@@ -566,17 +570,21 @@
   }
 
   /**
-   * The reader action of a key press. Keys that the focused control uses
-   * itself keep their normal behavior: Space and Enter press a button, the
-   * arrow keys move a slider, and text fields take every key.
+   * The reader action of a key press. Escape closes the reader. Other keys
+   * that the focused control uses itself keep their normal behavior: Space
+   * and Enter press a button, the arrow keys move a slider, and text fields
+   * take every key.
    * @param {string} key KeyboardEvent.key.
    * @param {string} target Kind of the focused element: 'button', 'range',
    *     'text' or 'other'.
    * @param {boolean} modified Whether Ctrl, Alt or Meta is held.
-   * @return {string} 'toggle', 'back', 'forward', 'faster', 'slower' or ''.
+   * @return {string} 'toggle', 'back', 'forward', 'faster', 'slower',
+   *     'close' or ''.
    */
   function keyAction(key, target, modified) {
-    if (modified || target === 'text') return '';
+    if (modified) return '';
+    if (key === 'Escape') return 'close';
+    if (target === 'text') return '';
     const actions = /** @type {!Object<string, string>} */ ({
       ' ': 'toggle',
       'ArrowLeft': 'back',
@@ -918,9 +926,11 @@
   /* global GM_getValue, GM_setValue, GM_registerMenuCommand */
 
   /**
-   * Elements of the reader window. themed lists the elements with colors
+   * Elements of the reader overlay. themed lists the elements with colors
    * from the theme: CSS property names mapped to keys of THEMES.light.
-   * @typedef {{stage: !HTMLElement, guide: !HTMLElement,
+   * @typedef {{backdrop: !HTMLElement, panel: !HTMLElement,
+   *     heading: !HTMLElement, close: !HTMLButtonElement,
+   *     stage: !HTMLElement, guide: !HTMLElement,
    *     word: !HTMLElement, before: !HTMLElement, pivot: !HTMLElement,
    *     after: !HTMLElement, message: !HTMLElement, context: !HTMLElement,
    *     fill: !HTMLElement, position: !HTMLElement, remaining: !HTMLElement,
@@ -935,13 +945,19 @@
    */
 
   /**
-   * An open reader window. index is the shown piece; finished tells that
-   * playback ran to the end, so that Play starts over. nextDue is the time
-   * (performance.now() of the window) at which the next piece is due.
-   * @typedef {{win: !Window, doc: !Document, ui: !Ui, text: !ReaderText,
-   *     key: string, factors: !Array<number>, sums: !Array<number>,
-   *     index: number, playing: boolean, finished: boolean, timer: number,
-   *     nextDue: number, darkQuery: ?MediaQueryList}} Reader
+   * The reader. host holds the overlay in a closed shadow root; it is in the
+   * page only while the reader is open. index is the shown piece; finished
+   * tells that playback ran to the end, so that Play starts over. nextDue is
+   * the time (performance.now()) at which the next piece is due. body is the
+   * page body that the open reader made inert, viewport the viewport meta
+   * element it added to the page, and focus the element that had the focus
+   * before.
+   * @typedef {{host: !HTMLElement, shadow: !ShadowRoot, ui: !Ui,
+   *     text: !ReaderText, key: string, factors: !Array<number>,
+   *     sums: !Array<number>, index: number, playing: boolean,
+   *     finished: boolean, timer: number, nextDue: number,
+   *     darkQuery: !MediaQueryList, body: ?HTMLElement,
+   *     viewport: ?HTMLMetaElement, focus: ?HTMLElement}} Reader
    */
 
   /**
@@ -961,12 +977,8 @@
    * Mutable state of the script.
    * @typedef {Object} State
    * @property {!Settings} settings
-   * @property {?Reader} reader The open reader window.
-   * @property {?Content} pending Content waiting for the window to open,
-   *     while the notice about a blocked pop-up is shown.
-   * @property {?HTMLElement} notice Host of that notice.
-   * @property {boolean} pageHideListener Whether the page's pagehide
-   *     listener is attached.
+   * @property {?Reader} reader Created on first use and kept after closing,
+   *     so that the same text continues where it was.
    * @property {!Caches} caches
    */
 
@@ -983,16 +995,8 @@
   const state = {
     settings: sanitizeSettings(null),
     reader: null,
-    pending: null,
-    notice: null,
-    pageHideListener: false,
     caches: newCaches(),
   };
-
-  // A name of its own for the reader window of this tab: window.open with
-  // the name of another tab's reader would take that window over.
-  const WINDOW_NAME =
-      `speed-reader-${Math.random().toString(36).slice(2, 10)}`;
 
   // ===========================================================================
   // Classifying elements and text (from the Reading Ruler)
@@ -1468,18 +1472,19 @@
   }
 
   // ===========================================================================
-  // Reader window: elements and styles
+  // Reader overlay: elements and styles
   // ===========================================================================
 
   // Colors of the reader in light and dark mode. The looks are set inline
-  // through the CSSOM, which no Content Security Policy blocks: the reader
-  // window inherits the page's policy, and in Firefox a script manager may
-  // have to run the script as a content script, where a constructed style
-  // sheet cannot be adopted. The color scheme is therefore followed through
+  // through the CSSOM, which no Content Security Policy blocks: in Firefox a
+  // script manager may have to run the script as a content script, where a
+  // constructed style sheet cannot be adopted, and the page's policy may
+  // block a style element. The color scheme is therefore followed through
   // matchMedia instead of a media query, and the style sheet below only
   // adds what inline styles cannot express.
   const THEMES = deepFreeze({
     light: {
+      backdrop: 'rgba(0, 0, 0, .45)',
       background: '#f7f6f2',
       text: '#1f2328',
       muted: '#646b73',
@@ -1491,6 +1496,7 @@
       mark: '#1f2328',
     },
     dark: {
+      backdrop: 'rgba(0, 0, 0, .6)',
       background: '#16181b',
       text: '#e7e6e1',
       muted: '#9aa1a8',
@@ -1527,7 +1533,12 @@
     forward: 'M13 6v12l8.5-6zM3 6v12l8.5-6z',
     play: 'M7 5v14l12-7z',
     pause: 'M6 5h4v14H6zM14 5h4v14h-4z',
+    close: 'M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 ' +
+        '6.4 19 5 17.6 10.6 12 5 6.4z',
   });
+
+  const FONT = '16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, ' +
+      'sans-serif';
 
   /**
    * Sets inline styles.
@@ -1542,52 +1553,47 @@
   }
 
   /**
-   * Creates an element with inline styles in a document.
-   * @param {!Document} doc
+   * Creates an element with inline styles.
    * @param {string} tag
    * @param {!Object<string, string>=} styles
    * @param {string=} className
    * @return {!HTMLElement}
    */
-  function createElement(doc, tag, styles = {}, className = '') {
-    const element = doc.createElement(tag);
+  function createElement(tag, styles = {}, className = '') {
+    const element = document.createElement(tag);
     if (className) element.className = className;
     setStyles(element, styles);
     return element;
   }
 
   /**
-   * Adds a style sheet to the reader document: a constructed one, created
-   * in the reader window, or a style element if adopting fails.
-   * @param {!Window} win
-   * @param {!Document} doc
+   * Adds the style sheet to the shadow root: a constructed one, or a style
+   * element if adopting fails.
+   * @param {!ShadowRoot} shadow
    */
-  function applyReaderStyles(win, doc) {
+  function applyReaderStyles(shadow) {
     try {
-      const Sheet = /** @type {typeof CSSStyleSheet} */ (
-        /** @type {*} */ (win).CSSStyleSheet);
-      const sheet = new Sheet();
+      const sheet = new CSSStyleSheet();
       sheet.replaceSync(READER_STYLES);
-      doc.adoptedStyleSheets = [sheet];
-      if (doc.adoptedStyleSheets.length) return;
+      shadow.adoptedStyleSheets = [sheet];
+      if (shadow.adoptedStyleSheets.length) return;
     } catch {
       // Fall back to a style element below.
     }
-    const style = doc.createElement('style');
+    const style = document.createElement('style');
     style.textContent = READER_STYLES;
-    (doc.head || doc.documentElement).append(style);
+    shadow.append(style);
   }
 
   /**
    * Creates an SVG icon.
-   * @param {!Document} doc
    * @param {string} path
    * @return {{icon: !SVGSVGElement, shape: !SVGPathElement}}
    */
-  function createIcon(doc, path) {
+  function createIcon(path) {
     const svgNs = 'http://www.w3.org/2000/svg';
     const icon = /** @type {!SVGSVGElement} */ (
-      doc.createElementNS(svgNs, 'svg'));
+      document.createElementNS(svgNs, 'svg'));
     // Presentation attributes, like inline styles, need no style sheet.
     const attributes = {
       'aria-hidden': 'true',
@@ -1601,20 +1607,18 @@
     }
     setStyles(icon, {'flex': 'none'});
     const shape = /** @type {!SVGPathElement} */ (
-      doc.createElementNS(svgNs, 'path'));
+      document.createElementNS(svgNs, 'path'));
     shape.setAttribute('d', path);
     icon.append(shape);
     return {icon, shape};
   }
 
   /**
-   * Builds the reader interface in the window's document.
-   * @param {!Window} win
-   * @param {!Document} doc
-   * @param {string} title Title of the page that is read.
+   * Builds the reader interface: a backdrop over the whole window with the
+   * reader panel in its middle.
    * @return {!Ui}
    */
-  function buildUi(win, doc, title) {
+  function buildUi() {
     /** @type {!Array<{element: !Element, styles: !Object<string, string>}>} */
     const themed = [];
     /**
@@ -1627,52 +1631,83 @@
       return element;
     };
 
-    doc.title = `Speed Reader – ${title}`;
-    doc.documentElement.lang = 'en';
-    // Without a viewport, Firefox for Android lays the tab out for a
-    // desktop width.
-    const viewport = /** @type {!HTMLMetaElement} */ (
-      doc.createElement('meta'));
-    viewport.name = 'viewport';
-    viewport.content = 'width=device-width, initial-scale=1';
-    (doc.head || doc.documentElement).append(viewport);
-    applyReaderStyles(win, doc);
+    // The backdrop scrolls if the panel is taller than the window, without
+    // passing the scrolling on to the page.
+    const backdrop = createElement('div', {
+      'box-sizing': 'border-box',
+      'display': 'flex',
+      'height': '100%',
+      'overflow': 'auto',
+      'overscroll-behavior': 'contain',
+      'padding': '16px',
+      'width': '100%',
+    }, 'sr-backdrop');
+    theme(backdrop, {'background': 'backdrop'});
 
-    const body = doc.body || doc.documentElement.appendChild(
-        doc.createElement('body'));
-    body.replaceChildren();
-    setStyles(body, {
-      'font': '16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, ' +
-          'sans-serif',
-      'margin': '0',
-      'overflow-x': 'hidden',
-    });
-    theme(body, {'background': 'background', 'color': 'text'});
-
-    const root = createElement(doc, 'main', {
+    // A margin of auto centers the panel and, unlike centering by the flex
+    // container, keeps its top reachable when it is taller than the window.
+    const panel = createElement('div', {
+      'border-radius': '12px',
+      'box-shadow': '0 8px 32px rgba(0, 0, 0, .3)',
       'box-sizing': 'border-box',
       'display': 'flex',
       'flex-direction': 'column',
+      'font': FONT,
       'gap': '12px',
-      'margin': '0 auto',
-      'max-width': '960px',
-      'min-height': '100vh',
-      'padding': '12px 16px max(16px, env(safe-area-inset-bottom))',
-    });
+      'margin': 'auto',
+      'max-width': `${CONFIG.panel.maxWidth}px`,
+      'min-height': `min(${CONFIG.panel.minHeight}px, 100%)`,
+      'outline': 'none',
+      'padding': '8px 16px max(16px, env(safe-area-inset-bottom))',
+      'width': '100%',
+    }, 'sr-panel');
+    panel.tabIndex = -1;
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-label', 'Speed Reader');
+    theme(panel, {'background': 'background', 'color': 'text'});
 
-    const heading = createElement(doc, 'h1', {
+    const header = createElement('div', {
+      'align-items': 'center',
+      'display': 'flex',
+      'gap': '8px',
+    });
+    const heading = createElement('h1', {
+      'flex': '1 1 auto',
       'font-size': '14px',
       'font-weight': '500',
-      'margin': '0',
+      'margin': '0 0 0 44px',
+      'min-width': '0',
       'overflow': 'hidden',
       'text-align': 'center',
       'text-overflow': 'ellipsis',
       'white-space': 'nowrap',
-    });
-    heading.textContent = title;
+    }, 'sr-heading');
     theme(heading, {'color': 'muted'});
+    const close = /** @type {!HTMLButtonElement} */ (createElement('button', {
+      '-webkit-tap-highlight-color': 'transparent',
+      'align-items': 'center',
+      'background': 'transparent',
+      'border': '0',
+      'border-radius': '22px',
+      'cursor': 'pointer',
+      'display': 'inline-flex',
+      'flex': 'none',
+      'height': '44px',
+      'justify-content': 'center',
+      'margin': '0',
+      'padding': '0',
+      'width': '44px',
+    }, 'sr-button sr-close'));
+    close.type = 'button';
+    close.title = 'Close (Esc)';
+    close.setAttribute('aria-label', 'Close');
+    close.append(createIcon(ICONS.close).icon);
+    close.addEventListener('mousedown', (event) => event.preventDefault());
+    theme(close, {'color': 'muted'});
+    header.append(heading, close);
 
-    const stage = createElement(doc, 'div', {
+    const stage = createElement('div', {
       '-webkit-tap-highlight-color': 'transparent',
       'cursor': 'pointer',
       'flex': '1 1 auto',
@@ -1684,7 +1719,7 @@
     }, 'sr-stage');
     stage.title = 'Play or pause (Space)';
 
-    const guide = createElement(doc, 'div', {
+    const guide = createElement('div', {
       'border-style': 'solid',
       'border-width': '1px 0',
       'box-sizing': 'border-box',
@@ -1697,7 +1732,7 @@
     });
     theme(guide, {'border-color': 'line'});
     for (const edge of ['top', 'bottom']) {
-      const tick = createElement(doc, 'div', {
+      const tick = createElement('div', {
         [edge]: '0',
         'height': '10px',
         'left': `${CONFIG.pivotShare * 100}%`,
@@ -1709,7 +1744,7 @@
       guide.append(tick);
     }
 
-    const word = createElement(doc, 'div', {
+    const word = createElement('div', {
       'font-weight': '500',
       'left': '0',
       'line-height': '1.2',
@@ -1718,13 +1753,13 @@
       'transform': 'translateY(-50%)',
       'white-space': 'pre',
     }, 'sr-word');
-    const before = createElement(doc, 'span', {}, 'sr-before');
-    const pivot = createElement(doc, 'span', {}, 'sr-pivot');
+    const before = createElement('span', {}, 'sr-before');
+    const pivot = createElement('span', {}, 'sr-pivot');
     theme(pivot, {'color': 'pivot'});
-    const after = createElement(doc, 'span', {}, 'sr-after');
+    const after = createElement('span', {}, 'sr-after');
     word.append(before, pivot, after);
 
-    const message = createElement(doc, 'p', {
+    const message = createElement('p', {
       'align-items': 'center',
       'box-sizing': 'border-box',
       'display': 'none',
@@ -1738,7 +1773,7 @@
     }, 'sr-message');
     stage.append(guide, word, message);
 
-    const context = createElement(doc, 'p', {
+    const context = createElement('p', {
       'font-size': '16px',
       'height': '4.2em',
       'margin': '0',
@@ -1748,13 +1783,13 @@
     }, 'sr-context');
     theme(context, {'color': 'muted'});
 
-    const track = createElement(doc, 'div', {
+    const track = createElement('div', {
       'border-radius': '3px',
       'height': '6px',
       'overflow': 'hidden',
     });
     theme(track, {'background': 'line'});
-    const fill = createElement(doc, 'div', {
+    const fill = createElement('div', {
       'height': '100%',
       'transition': 'width 120ms linear',
       'width': '0',
@@ -1762,7 +1797,7 @@
     theme(fill, {'background': 'fill'});
     track.append(fill);
 
-    const status = createElement(doc, 'div', {
+    const status = createElement('div', {
       'display': 'flex',
       'font-size': '14px',
       'font-variant-numeric': 'tabular-nums',
@@ -1770,8 +1805,8 @@
       'justify-content': 'space-between',
     });
     theme(status, {'color': 'muted'});
-    const position = createElement(doc, 'span', {}, 'sr-position');
-    const remaining = createElement(doc, 'span', {}, 'sr-remaining');
+    const position = createElement('span', {}, 'sr-position');
+    const remaining = createElement('span', {}, 'sr-remaining');
     status.append(position, remaining);
 
     /** @type {!Array<!HTMLElement>} */
@@ -1785,7 +1820,7 @@
      *     text: !HTMLElement}}
      */
     const createButton = (label, path, className, primary) => {
-      const button = /** @type {!HTMLButtonElement} */ (createElement(doc,
+      const button = /** @type {!HTMLButtonElement} */ (createElement(
           'button', {
             '-webkit-tap-highlight-color': 'transparent',
             'align-items': 'center',
@@ -1809,8 +1844,8 @@
         'border-color': primary ? 'text' : 'border',
         'color': primary ? 'background' : 'text',
       });
-      const {icon, shape} = createIcon(doc, path);
-      const text = createElement(doc, 'span');
+      const {icon, shape} = createIcon(path);
+      const text = createElement('span');
       text.textContent = label;
       labels.push(text);
       button.append(icon, text);
@@ -1819,7 +1854,7 @@
       button.addEventListener('mousedown', (event) => event.preventDefault());
       return {button, shape, text};
     };
-    const controls = createElement(doc, 'div', {
+    const controls = createElement('div', {
       'display': 'flex',
       'gap': '12px',
       'justify-content': 'center',
@@ -1830,7 +1865,7 @@
         false);
     controls.append(back.button, play.button, forward.button);
 
-    const settings = createElement(doc, 'div', {
+    const settings = createElement('div', {
       'display': 'flex',
       'flex-wrap': 'wrap',
       'gap': '4px 24px',
@@ -1845,7 +1880,7 @@
     const createSetting = (label, name, type) => {
       const range = /** @type {!Object<string, !Range>} */ (
         CONFIG.settings)[name];
-      const field = createElement(doc, 'label', {
+      const field = createElement('label', {
         'align-items': 'center',
         'display': 'flex',
         'flex': type === 'range' ? '1 1 240px' : '0 1 auto',
@@ -1854,10 +1889,10 @@
         'max-width': '340px',
         'min-height': '44px',
       });
-      const caption = createElement(doc, 'span', {'min-width': '3em'});
+      const caption = createElement('span', {'min-width': '3em'});
       caption.textContent = label;
       theme(caption, {'color': 'muted'});
-      const input = /** @type {!HTMLInputElement} */ (createElement(doc,
+      const input = /** @type {!HTMLInputElement} */ (createElement(
           'input', type === 'range' ?
               {
                 'flex': '1 1 auto',
@@ -1882,7 +1917,7 @@
       theme(input, type === 'range' ?
           {'accent-color': 'fill'} :
           {'background': 'surface', 'border-color': 'border', 'color': 'text'});
-      const value = createElement(doc, 'span', {
+      const value = createElement('span', {
         'font-variant-numeric': 'tabular-nums',
         'min-width': '4.5em',
       }, `sr-${name}-value`);
@@ -1895,10 +1930,14 @@
     const skip = createSetting('Skip', 'skip', 'number');
     skip.value.textContent = 'words';
 
-    root.append(heading, stage, context, track, status, controls, settings);
-    body.append(root);
+    panel.append(header, stage, context, track, status, controls, settings);
+    backdrop.append(panel);
 
     return {
+      backdrop,
+      panel,
+      heading,
+      close,
       stage,
       guide,
       word,
@@ -1926,15 +1965,22 @@
   }
 
   /**
+   * @param {!Reader} reader
+   * @return {!Object<string, string>} The light or dark colors.
+   */
+  function colorsOf(reader) {
+    return /** @type {!Object<string, string>} */ (
+      reader.darkQuery.matches ? THEMES.dark : THEMES.light);
+  }
+
+  /**
    * Applies the light or dark colors.
    * @param {!Reader} reader
    */
   function applyTheme(reader) {
-    const dark = !!reader.darkQuery?.matches;
-    const colors = /** @type {!Object<string, string>} */ (
-      dark ? THEMES.dark : THEMES.light);
-    reader.doc.documentElement.style.setProperty(
-        'color-scheme', dark ? 'dark' : 'light');
+    reader.ui.backdrop.style.setProperty('color-scheme',
+        reader.darkQuery.matches ? 'dark' : 'light');
+    const colors = colorsOf(reader);
     for (const {element, styles} of reader.ui.themed) {
       for (const [name, key] of Object.entries(styles)) {
         /** @type {!HTMLElement} */ (element).style.setProperty(
@@ -1944,18 +1990,27 @@
   }
 
   /**
-   * Shows the button labels only if the window is wide enough.
+   * Fits the panel to the window: it fills a narrow window, and the buttons
+   * show their labels only if the window is wide enough.
    * @param {!Reader} reader
    */
   function applyWidth(reader) {
-    const compact = reader.win.innerWidth < CONFIG.compactWidth;
-    for (const label of reader.ui.labels) {
+    const {ui} = reader;
+    const width = window.innerWidth;
+    const full = width < CONFIG.fullScreenWidth;
+    setStyles(ui.backdrop, {'padding': full ? '0' : '16px'});
+    setStyles(ui.panel, {
+      'border-radius': full ? '0' : '12px',
+      'min-height': full ? '100%' : `min(${CONFIG.panel.minHeight}px, 100%)`,
+    });
+    const compact = width < CONFIG.compactWidth;
+    for (const label of ui.labels) {
       label.style.setProperty('display', compact ? 'none' : 'inline');
     }
   }
 
   // ===========================================================================
-  // Reader window: rendering
+  // Reader overlay: rendering
   // ===========================================================================
 
   /**
@@ -2000,7 +2055,7 @@
    * @param {!Reader} reader
    */
   function renderContext(reader) {
-    const {ui, text, doc} = reader;
+    const {ui, text} = reader;
     const piece = text.pieces[reader.index];
     ui.context.style.setProperty('visibility',
         reader.playing || !piece ? 'hidden' : 'visible');
@@ -2014,12 +2069,11 @@
      */
     const join = (from, to) => text.words.slice(from, to)
         .map((word) => word.text).join(' ');
-    const mark = createElement(doc, 'mark', {
+    const mark = createElement('mark', {
       'background': 'transparent',
+      'color': colorsOf(reader).mark,
       'font-weight': '600',
     }, 'sr-mark');
-    mark.style.setProperty('color', /** @type {!Object<string, string>} */ (
-      reader.darkQuery?.matches ? THEMES.dark : THEMES.light).mark);
     mark.textContent = current.text;
     const head = join(sentence.start, piece.word);
     const tail = join(piece.word + 1, sentence.end);
@@ -2079,7 +2133,7 @@
     ui.fontSize.value = String(settings.fontSize);
     ui.fontSizeValue.textContent = `${settings.fontSize} px`;
     // Keep what the user is typing.
-    if (reader.doc.activeElement !== ui.skip) {
+    if (reader.shadow.activeElement !== ui.skip) {
       ui.skip.value = String(settings.skip);
     }
   }
@@ -2090,7 +2144,7 @@
 
   /** @param {!Reader} reader */
   function clearTimer(reader) {
-    if (reader.timer) reader.win.clearTimeout(reader.timer);
+    if (reader.timer) clearTimeout(reader.timer);
     reader.timer = 0;
   }
 
@@ -2104,21 +2158,19 @@
   }
 
   /**
-   * Schedules the next piece at reader.nextDue with the timers of the
-   * reader window: the page that opened it is often hidden or in the
-   * background, where its timers are throttled. Each piece is due a fixed
+   * Schedules the next piece at reader.nextDue. Each piece is due a fixed
    * time after the one before, so delays of single timers do not add up;
-   * after a long delay the schedule restarts.
+   * after a long delay (a throttled timer) the schedule restarts.
    * @param {!Reader} reader
    */
   function schedule(reader) {
     clearTimer(reader);
     if (!reader.playing) return;
-    const now = reader.win.performance.now();
+    const now = performance.now();
     if (reader.nextDue < now - CONFIG.maxLag) {
       reader.nextDue = now + currentDuration(reader);
     }
-    reader.timer = reader.win.setTimeout(() => advance(reader),
+    reader.timer = setTimeout(() => advance(reader),
         Math.max(0, reader.nextDue - now));
   }
 
@@ -2128,9 +2180,7 @@
    */
   function advance(reader) {
     reader.timer = 0;
-    if (state.reader !== reader || reader.win.closed || !reader.playing) {
-      return;
-    }
+    if (!reader.playing || !reader.host.isConnected) return;
     if (reader.index >= reader.text.pieces.length - 1) {
       reader.playing = false;
       reader.finished = true;
@@ -2153,7 +2203,7 @@
       reader.finished = false;
     }
     reader.playing = true;
-    reader.nextDue = reader.win.performance.now() + currentDuration(reader);
+    reader.nextDue = performance.now() + currentDuration(reader);
     render(reader);
     schedule(reader);
   }
@@ -2185,7 +2235,7 @@
         direction * state.settings.skip);
     reader.finished = false;
     if (reader.playing) {
-      reader.nextDue = reader.win.performance.now() + currentDuration(reader);
+      reader.nextDue = performance.now() + currentDuration(reader);
       schedule(reader);
     }
     render(reader);
@@ -2208,7 +2258,7 @@
   }
 
   // ===========================================================================
-  // Reader window: input
+  // Reader overlay: input
   // ===========================================================================
 
   /**
@@ -2216,32 +2266,60 @@
    * @return {string} Kind of a focused element for keyAction.
    */
   function targetKind(target) {
-    // Elements of the reader window come from another realm, so instanceof
-    // checks against this window's classes would fail.
-    const element = /** @type {?Element} */ (
-      target && 'localName' in target ? target : null);
-    if (!element) return 'other';
-    const tag = element.localName;
-    if (tag === 'button') return 'button';
-    if (tag === 'input') {
-      return /** @type {!HTMLInputElement} */ (element).type === 'range' ?
-          'range' :
-          'text';
+    if (target instanceof HTMLButtonElement) return 'button';
+    if (target instanceof HTMLInputElement) {
+      return target.type === 'range' ? 'range' : 'text';
     }
-    if (tag === 'textarea' || tag === 'select') return 'text';
+    if (target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement) {
+      return 'text';
+    }
     return 'other';
   }
 
   /**
-   * Adds the listeners of the reader window.
+   * Handles a key press in the reader.
+   * @param {!Reader} reader
+   * @param {!KeyboardEvent} event
+   */
+  function onReaderKey(reader, event) {
+    const action = keyAction(event.key, targetKind(event.target),
+        event.ctrlKey || event.altKey || event.metaKey);
+    if (!action) return;
+    event.preventDefault();
+    if (action === 'close') {
+      closeReader(reader);
+    } else if (action === 'toggle') {
+      if (!event.repeat) togglePlay(reader);
+    } else if (action === 'back' || action === 'forward') {
+      skipWords(reader, action === 'back' ? -1 : 1);
+    } else {
+      changeSetting(reader, 'wpm', state.settings.wpm +
+          (action === 'faster' ? 1 : -1) * CONFIG.wpmKeyStep);
+    }
+  }
+
+  /**
+   * Adds the listeners of the reader. They stay attached while the reader
+   * is closed, since it is opened again with the same elements.
    * @param {!Reader} reader
    */
   function attachReaderListeners(reader) {
-    const {win, doc, ui} = reader;
+    const {ui} = reader;
+    ui.close.addEventListener('click', () => closeReader(reader));
     ui.play.addEventListener('click', () => togglePlay(reader));
     ui.back.addEventListener('click', () => skipWords(reader, -1));
     ui.forward.addEventListener('click', () => skipWords(reader, 1));
     ui.stage.addEventListener('click', () => togglePlay(reader));
+    // A click beside the panel closes the reader. A press that starts on
+    // the panel (dragging a slider out of it) does not.
+    let pressedBeside = false;
+    ui.backdrop.addEventListener('pointerdown', (event) => {
+      pressedBeside = event.target === ui.backdrop;
+    });
+    ui.backdrop.addEventListener('click', (event) => {
+      if (pressedBeside && event.target === ui.backdrop) closeReader(reader);
+    });
     ui.wpm.addEventListener('input',
         () => changeSetting(reader, 'wpm', ui.wpm.value));
     ui.fontSize.addEventListener('input',
@@ -2255,30 +2333,23 @@
       changeSetting(reader, 'skip', ui.skip.value);
       ui.skip.value = String(state.settings.skip);
     });
-    doc.addEventListener('keydown', (event) => {
-      const action = keyAction(event.key, targetKind(event.target),
-          event.ctrlKey || event.altKey || event.metaKey);
-      if (!action) return;
-      event.preventDefault();
-      if (action === 'toggle') {
-        if (!event.repeat) togglePlay(reader);
-      } else if (action === 'back' || action === 'forward') {
-        skipWords(reader, action === 'back' ? -1 : 1);
-      } else {
-        changeSetting(reader, 'wpm', state.settings.wpm +
-            (action === 'faster' ? 1 : -1) * CONFIG.wpmKeyStep);
+    ui.backdrop.addEventListener('keydown',
+        (event) => onReaderKey(reader, event));
+    // Keys typed in the reader do not reach the page's shortcuts.
+    for (const type of ['keydown', 'keyup', 'keypress']) {
+      reader.host.addEventListener(type, (event) => event.stopPropagation());
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden' && reader.playing) {
+        pause(reader);
       }
     });
-    doc.addEventListener('visibilitychange', () => {
-      if (doc.visibilityState === 'hidden' && reader.playing) pause(reader);
-    });
-    win.addEventListener('resize', () => {
+    window.addEventListener('resize', () => {
+      if (!reader.host.isConnected) return;
       applyWidth(reader);
       renderWord(reader);
     });
-    // Closing the window ends the reader; its timers end with it.
-    win.addEventListener('pagehide', () => releaseReader(reader));
-    reader.darkQuery?.addEventListener('change', () => {
+    reader.darkQuery.addEventListener('change', () => {
       applyTheme(reader);
       renderContext(reader);
     });
@@ -2289,31 +2360,90 @@
   // ===========================================================================
 
   /**
-   * Forgets a reader whose window was closed.
+   * Creates the reader, closed.
+   * @return {!Reader}
+   */
+  function createReader() {
+    const host = /** @type {!HTMLElement} */ (
+      document.createElement('speed-reader'));
+    host.style.cssText = 'all: initial; display: block; inset: 0; ' +
+        'position: fixed; z-index: 2147483647;';
+    const shadow = host.attachShadow({mode: 'closed'});
+    applyReaderStyles(shadow);
+    const ui = buildUi();
+    shadow.append(ui.backdrop);
+    /** @type {!Reader} */
+    const reader = {
+      host,
+      shadow,
+      ui,
+      text: {words: [], pieces: [], sentences: []},
+      key: '\u0000',
+      factors: [],
+      sums: [0],
+      index: 0,
+      playing: false,
+      finished: false,
+      timer: 0,
+      nextDue: 0,
+      darkQuery: window.matchMedia('(prefers-color-scheme: dark)'),
+      body: null,
+      viewport: null,
+      focus: null,
+    };
+    attachReaderListeners(reader);
+    return reader;
+  }
+
+  /**
+   * Puts the reader over the page. The page body becomes inert meanwhile,
+   * so that neither the focus nor clicks get to the page behind it. A page
+   * without a viewport meta element gets one: Firefox for Android lays such
+   * a page out for a desktop width, which would shrink the reader too. The
+   * minimum scale keeps a page that is wider than the screen from widening
+   * the area that the fixed reader covers.
    * @param {!Reader} reader
    */
-  function releaseReader(reader) {
-    reader.playing = false;
-    if (!reader.win.closed) clearTimer(reader);
-    reader.timer = 0;
-    if (state.reader === reader) state.reader = null;
-  }
-
-  /**
-   * Closes the reader window and the notice when the page is left: the
-   * reader is driven by this page.
-   */
-  function onPageHide() {
-    const reader = state.reader;
-    if (reader) {
-      releaseReader(reader);
-      if (!reader.win.closed) reader.win.close();
+  function openReader(reader) {
+    if (reader.host.isConnected) return;
+    const active = document.activeElement;
+    reader.focus = active instanceof HTMLElement ? active : null;
+    const body = document.body;
+    reader.body = body && !body.inert ? body : null;
+    if (reader.body) reader.body.inert = true;
+    if (!document.querySelector('meta[name="viewport"]')) {
+      const viewport = /** @type {!HTMLMetaElement} */ (
+        document.createElement('meta'));
+      viewport.name = 'viewport';
+      viewport.content =
+          'width=device-width, initial-scale=1, minimum-scale=1';
+      (document.head || document.documentElement).append(viewport);
+      reader.viewport = viewport;
     }
-    removeNotice();
+    document.documentElement.append(reader.host);
+    applyTheme(reader);
+    applyWidth(reader);
   }
 
   /**
-   * Shows new content in a reader, paused at its first word. The same text
+   * Removes the reader from the page, paused, and gives the page its focus
+   * back.
+   * @param {!Reader} reader
+   */
+  function closeReader(reader) {
+    if (!reader.host.isConnected) return;
+    pause(reader);
+    reader.host.remove();
+    if (reader.body) reader.body.inert = false;
+    reader.body = null;
+    reader.viewport?.remove();
+    reader.viewport = null;
+    reader.focus?.focus({preventScroll: true});
+    reader.focus = null;
+  }
+
+  /**
+   * Shows new content in the reader, paused at its first word. The same text
    * keeps its position.
    * @param {!Reader} reader
    * @param {!Content} content
@@ -2321,7 +2451,7 @@
   function loadContent(reader, content) {
     const key = content.paragraphs.map((paragraph) => paragraph.text)
         .join('\n');
-    reader.doc.title = `Speed Reader – ${content.title}`;
+    reader.ui.heading.textContent = content.title;
     if (key === reader.key) {
       pause(reader);
       return;
@@ -2338,191 +2468,29 @@
   }
 
   /**
-   * Shows content in the reader window, opening the window if needed.
+   * Shows content in the reader, opening it if needed.
    * @param {!Content} content
-   * @return {boolean} false if the browser blocked the window.
    */
   function showReader(content) {
     state.settings = sanitizeSettings(
         GM_getValue(CONFIG.storageSettings, null));
-    const open = state.reader;
-    if (open && !open.win.closed) {
-      loadContent(open, content);
-      open.win.focus();
-      return true;
-    }
-    const {width, height} = CONFIG.window;
-    // An empty URL keeps the initial document: loading about:blank would
-    // replace the interface built below.
-    const win = window.open('', WINDOW_NAME,
-        `popup,width=${width},height=${height}`);
-    if (!win) return false;
-    const doc = win.document;
-    /** @type {!Reader} */
-    const reader = {
-      win,
-      doc,
-      ui: buildUi(win, doc, content.title),
-      text: {words: [], pieces: [], sentences: []},
-      key: '\u0000',
-      factors: [],
-      sums: [0],
-      index: 0,
-      playing: false,
-      finished: false,
-      timer: 0,
-      nextDue: 0,
-      darkQuery: win.matchMedia ?
-          win.matchMedia('(prefers-color-scheme: dark)') :
-          null,
-    };
-    state.reader = reader;
-    applyTheme(reader);
-    applyWidth(reader);
-    attachReaderListeners(reader);
+    if (!state.reader) state.reader = createReader();
+    const reader = state.reader;
+    openReader(reader);
     loadContent(reader, content);
-    // The window may get its final size after this script ran.
-    win.requestAnimationFrame(() => {
+    reader.ui.panel.focus({preventScroll: true});
+    // The layout may still change after this script ran (scroll bars).
+    requestAnimationFrame(() => {
+      if (!reader.host.isConnected) return;
       applyWidth(reader);
       renderWord(reader);
     });
-    if (!state.pageHideListener) {
-      window.addEventListener('pagehide', onPageHide);
-      state.pageHideListener = true;
-    }
-    win.focus();
-    return true;
-  }
-
-  // ===========================================================================
-  // Notice about a blocked pop-up (Shadow DOM in the page)
-  // ===========================================================================
-
-  /** Removes the notice. */
-  function removeNotice() {
-    state.notice?.remove();
-    state.notice = null;
-    state.pending = null;
-  }
-
-  /**
-   * Creates a button of the notice.
-   * @param {string} label
-   * @param {!Object<string, string>} styles
-   * @param {() => void} action
-   * @return {!HTMLButtonElement}
-   */
-  function createNoticeButton(label, styles, action) {
-    const button = /** @type {!HTMLButtonElement} */ (createElement(document,
-        'button', {
-          'border': '1px solid',
-          'border-radius': '22px',
-          'box-sizing': 'border-box',
-          'cursor': 'pointer',
-          'font': 'inherit',
-          'margin': '0',
-          'min-height': '44px',
-          'min-width': '44px',
-          'padding': '0 16px',
-          ...styles,
-        }));
-    button.type = 'button';
-    button.textContent = label;
-    // Keep the selection of the page.
-    button.addEventListener('mousedown', (event) => event.preventDefault());
-    button.addEventListener('click', action);
-    return button;
-  }
-
-  /**
-   * Shows a notice in the page whose button opens the reader: a click is a
-   * user action, which pop-up blockers allow.
-   */
-  function showNotice() {
-    if (state.notice?.isConnected) return;
-    const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const colors = dark ? THEMES.dark : THEMES.light;
-    const host = /** @type {!HTMLElement} */ (
-      document.createElement('speed-reader-notice'));
-    host.style.cssText = 'all: initial; bottom: 16px; display: block; ' +
-        'position: fixed; right: 16px; z-index: 2147483647;';
-    const shadow = host.attachShadow({mode: 'closed'});
-    const card = createElement(document, 'div', {
-      'background': colors.surface,
-      'border': `1px solid ${colors.border}`,
-      'border-radius': '12px',
-      'box-shadow': '0 4px 16px rgba(0, 0, 0, .25)',
-      'box-sizing': 'border-box',
-      'color': colors.text,
-      'display': 'flex',
-      'flex-direction': 'column',
-      'font': '14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, ' +
-          'sans-serif',
-      'gap': '8px',
-      'max-width': 'min(320px, calc(100vw - 32px))',
-      'padding': '12px 12px 12px 16px',
-    });
-    card.setAttribute('role', 'dialog');
-    card.setAttribute('aria-label', 'Speed Reader');
-    const header = createElement(document, 'div', {
-      'align-items': 'center',
-      'display': 'flex',
-      'gap': '8px',
-      'justify-content': 'space-between',
-    });
-    const title = createElement(document, 'strong', {'font-size': '15px'});
-    title.textContent = 'Speed Reader';
-    const close = createNoticeButton('×', {
-      'background': 'transparent',
-      'border-color': 'transparent',
-      'color': colors.muted,
-      'font-size': '22px',
-      'padding': '0',
-    }, removeNotice);
-    close.title = 'Close';
-    close.setAttribute('aria-label', 'Close');
-    header.append(title, close);
-    const text = createElement(document, 'p', {'margin': '0'});
-    text.textContent = 'The browser blocked the reader window. Allow ' +
-        'pop-ups for this site to skip this step next time.';
-    const open = createNoticeButton('Open reader', {
-      'align-self': 'flex-start',
-      'background': colors.text,
-      'border-color': colors.text,
-      'color': colors.background,
-    }, () => {
-      const content = state.pending;
-      if (content && showReader(content)) removeNotice();
-    });
-    open.className = 'sr-open';
-    card.append(header, text, open);
-    shadow.append(card);
-    document.documentElement.append(host);
-    state.notice = host;
-    if (!state.pageHideListener) {
-      window.addEventListener('pagehide', onPageHide);
-      state.pageHideListener = true;
-    }
   }
 
   // ===========================================================================
   // Menu command and startup
   // ===========================================================================
 
-  /**
-   * Reads the selection or the page in the reader window, or shows the
-   * notice if the browser blocks the window.
-   */
-  function onMenuCommand() {
-    const content = extractContent();
-    if (showReader(content)) {
-      removeNotice();
-    } else {
-      showNotice();
-      state.pending = content;
-    }
-  }
-
-  GM_registerMenuCommand('Speed Reader: Read this page', onMenuCommand,
-      {id: 'read', autoClose: true});
+  GM_registerMenuCommand('Speed Reader: Read this page',
+      () => showReader(extractContent()), {id: 'read', autoClose: true});
 })();

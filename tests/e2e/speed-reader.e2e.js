@@ -4,7 +4,9 @@
  * `npm install`, `npx playwright install firefox`, then `npm run test:e2e`.
  * Tests that involve playback never depend on how fast it runs: they wait
  * for progress, check that a paused reader stays where it is, or record
- * the shown words in the reader window.
+ * the shown words in the reader. The harness opens the reader's shadow
+ * root, so Playwright's selectors reach into it; code that runs in the
+ * page finds the elements with reader().
  */
 
 'use strict';
@@ -54,8 +56,9 @@ after(async () => {
 });
 
 /**
- * Runs a test on a fixture page and closes its context afterwards (with the
- * reader window), also when the test fails.
+ * Runs a test on a fixture page and closes its context afterwards, also
+ * when the test fails. The page gets a function reader(selector) that finds
+ * an element in the reader's shadow root.
  * @param {string} name File name in tests/fixtures/.
  * @param {(page: !import('playwright').Page) => !Promise<void>} test
  * @param {!Object=} preset Stored values (GM_getValue) before the page loads.
@@ -69,6 +72,8 @@ async function withPage(name, test, preset = {}) {
   try {
     await context.addInitScript((values) => {
       window.harnessPreset = values;
+      window.reader = (selector) => document.querySelector('speed-reader')
+          ?.shadowRoot?.querySelector(selector) ?? null;
     }, preset);
     const page = await context.newPage();
     await page.goto(`${baseUrl}/tests/fixtures/${name}`);
@@ -79,57 +84,60 @@ async function withPage(name, test, preset = {}) {
 }
 
 /**
- * Runs the menu command and returns the reader window.
+ * Runs the menu command and waits for the reader.
  * @param {!import('playwright').Page} page
- * @return {!Promise<!import('playwright').Page>}
+ * @return {!Promise<void>}
  */
 async function openReader(page) {
-  const [popup] = await Promise.all([
-    page.waitForEvent('popup'),
-    page.evaluate((caption) => harnessRunMenuCommand(caption), MENU),
-  ]);
-  await popup.waitForSelector('.sr-position', {state: 'attached'});
-  return popup;
+  await page.evaluate((caption) => harnessRunMenuCommand(caption), MENU);
+  await page.waitForSelector('.sr-position', {state: 'attached'});
 }
 
 /**
- * @param {!import('playwright').Page} popup
+ * @param {!import('playwright').Page} page
+ * @return {!Promise<boolean>} Whether the reader is in the page.
+ */
+function isOpen(page) {
+  return page.evaluate(() => !!document.querySelector('speed-reader'));
+}
+
+/**
+ * @param {!import('playwright').Page} page
  * @return {!Promise<{word: string, mark: ?string, index: number,
  *     total: number, playing: boolean, contextVisible: boolean,
  *     remaining: string, message: string}>} What the reader shows; index
  *     is 1-based, 0 without text.
  */
-function readerState(popup) {
-  return popup.evaluate(() => {
-    const element = (selector) => document.querySelector(selector);
+function readerState(page) {
+  return page.evaluate(() => {
     const match = /Word (\d+) of (\d+)/.exec(
-        element('.sr-position').textContent);
-    const context = element('.sr-context');
+        reader('.sr-position').textContent);
+    const context = reader('.sr-context');
     return {
-      word: element('.sr-word').textContent,
-      mark: element('.sr-mark')?.textContent ?? null,
+      word: reader('.sr-word').textContent,
+      mark: reader('.sr-mark')?.textContent ?? null,
       index: match ? Number(match[1]) : 0,
       total: match ? Number(match[2]) : 0,
-      playing: element('.sr-play').getAttribute('aria-label') === 'Pause',
+      playing: reader('.sr-play').getAttribute('aria-label') === 'Pause',
       contextVisible: context.style.visibility !== 'hidden',
-      remaining: element('.sr-remaining').textContent,
-      message: element('.sr-message').style.display === 'none' ?
+      remaining: reader('.sr-remaining').textContent,
+      message: reader('.sr-message').style.display === 'none' ?
           '' :
-          element('.sr-message').textContent,
+          reader('.sr-message').textContent,
     };
   });
 }
 
 /**
- * Starts recording every shown word and position in the reader window.
- * @param {!import('playwright').Page} popup
+ * Starts recording every shown word and position in the reader.
+ * @param {!import('playwright').Page} page
  * @return {!Promise<void>}
  */
-function startRecording(popup) {
-  return popup.evaluate(() => {
+function startRecording(page) {
+  return page.evaluate(() => {
     window.recorded = [];
-    const word = document.querySelector('.sr-word');
-    const position = document.querySelector('.sr-position');
+    const word = reader('.sr-word');
+    const position = reader('.sr-position');
     const record = () => {
       const entry = `${position.textContent}: ${word.textContent}`;
       if (window.recorded.at(-1) !== entry) window.recorded.push(entry);
@@ -146,16 +154,16 @@ function startRecording(popup) {
  * Collects all words of the text by stepping through it word by word with
  * the Forward button (needs a skip setting of 1). The marked word in the
  * sentence below shows each whole word, also when it is split into pieces.
- * @param {!import('playwright').Page} popup
+ * @param {!import('playwright').Page} page
  * @return {!Promise<!Array<string>>}
  */
-function collectWords(popup) {
-  return popup.evaluate(() => {
+function collectWords(page) {
+  return page.evaluate(() => {
     const words = [];
-    const forward = document.querySelector('.sr-forward');
-    const position = document.querySelector('.sr-position');
+    const forward = reader('.sr-forward');
+    const position = reader('.sr-position');
     for (let guard = 0; guard < 1000; guard++) {
-      words.push(document.querySelector('.sr-mark').textContent);
+      words.push(reader('.sr-mark').textContent);
       const [, index, total] = /Word (\d+) of (\d+)/.exec(
           position.textContent);
       if (index === total) break;
@@ -200,45 +208,50 @@ const ARTICLE_TEXT = [
 describe('article page', () => {
   it('opens paused on the first word of the article', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
-      const state = await readerState(popup);
+      let popups = 0;
+      page.on('popup', () => popups++);
+      await openReader(page);
+      const state = await readerState(page);
       assert.equal(state.word, 'Steam');
       assert.equal(state.index, 1);
       assert.equal(state.total, ARTICLE_TEXT.split(' ').length);
       assert.equal(state.playing, false);
       assert.equal(state.contextVisible, true);
       assert.equal(state.mark, 'Steam');
-      assert.equal(await popup.title(),
-          'Speed Reader – Fixture: speed reader');
+      assert.equal(await page.textContent('.sr-heading'),
+          'Fixture: speed reader');
       // The fixation letter of "Steam" is its second letter.
-      assert.equal(await popup.textContent('.sr-pivot'), 't');
+      assert.equal(await page.textContent('.sr-pivot'), 't');
+      // The reader is an overlay, not a window of its own.
+      assert.equal(popups, 0);
+      assert.equal(page.context().pages().length, 1);
     });
   });
 
   it('reads the article without navigation, sidebar, comments, hidden ' +
       'text, code and footnote markers', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
-      const words = await collectWords(popup);
+      await openReader(page);
+      const words = await collectWords(page);
       assert.equal(words.join(' '), ARTICLE_TEXT);
     }, {settings: {skip: 1}});
   });
 
   it('shows long words in pieces', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
+      await openReader(page);
       // Go to "The" before the long compound and play from there.
-      await popup.evaluate(() => {
-        const forward = document.querySelector('.sr-forward');
+      await page.evaluate(() => {
+        const forward = reader('.sr-forward');
         for (let index = 0; index < 31; index++) forward.click();
       });
-      assert.equal((await readerState(popup)).mark, 'The');
-      await startRecording(popup);
-      await popup.click('.sr-play');
-      await popup.waitForFunction(() => /Word 3[5-9] of/.test(
-          document.querySelector('.sr-position').textContent));
-      await popup.click('.sr-play');
-      const recorded = await popup.evaluate(() => window.recorded);
+      assert.equal((await readerState(page)).mark, 'The');
+      await startRecording(page);
+      await page.click('.sr-play');
+      await page.waitForFunction(() => /Word 3[5-9] of/.test(
+          reader('.sr-position').textContent));
+      await page.click('.sr-play');
+      const recorded = await page.evaluate(() => window.recorded);
       const pieces = recorded.filter((entry) => entry.startsWith('Word 33 '))
           .map((entry) => entry.split(': ')[1]);
       assert.equal(pieces.length, 2);
@@ -258,8 +271,8 @@ describe('article page', () => {
         getSelection().removeAllRanges();
         getSelection().addRange(range);
       });
-      const popup = await openReader(page);
-      const state = await readerState(popup);
+      await openReader(page);
+      const state = await readerState(page);
       assert.equal(state.word, 'Today,');
       assert.equal(state.total, 3);
     });
@@ -269,134 +282,148 @@ describe('article page', () => {
 describe('controls', () => {
   it('plays, pauses and skips with the buttons', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
-      await popup.click('.sr-forward');
-      assert.equal((await readerState(popup)).index, 11);
-      await popup.click('.sr-back');
-      assert.equal((await readerState(popup)).index, 1);
+      await openReader(page);
+      await page.click('.sr-forward');
+      assert.equal((await readerState(page)).index, 11);
+      await page.click('.sr-back');
+      assert.equal((await readerState(page)).index, 1);
       // Back stops at the start.
-      await popup.click('.sr-back');
-      assert.equal((await readerState(popup)).index, 1);
+      await page.click('.sr-back');
+      assert.equal((await readerState(page)).index, 1);
 
-      await popup.click('.sr-play');
-      let state = await readerState(popup);
+      await page.click('.sr-play');
+      let state = await readerState(page);
       assert.equal(state.playing, true);
       assert.equal(state.contextVisible, false);
-      await popup.waitForFunction(() => /Word ([3-9]|\d\d+) of/.test(
-          document.querySelector('.sr-position').textContent));
+      await page.waitForFunction(() => /Word ([3-9]|\d\d+) of/.test(
+          reader('.sr-position').textContent));
 
       // Skipping while playing continues at the new place.
-      const before = (await readerState(popup)).index;
-      await popup.click('.sr-forward');
-      state = await readerState(popup);
+      const before = (await readerState(page)).index;
+      await page.click('.sr-forward');
+      state = await readerState(page);
       assert.equal(state.playing, true);
       assert.ok(state.index >= before + 10, `${state.index} < ${before} + 10`);
 
-      await popup.click('.sr-play');
-      state = await readerState(popup);
+      await page.click('.sr-play');
+      state = await readerState(page);
       assert.equal(state.playing, false);
       assert.equal(state.contextVisible, true);
       await delay(400);
-      assert.equal((await readerState(popup)).index, state.index);
+      assert.equal((await readerState(page)).index, state.index);
 
       // A click on the word toggles playback too.
-      await popup.click('.sr-stage');
-      assert.equal((await readerState(popup)).playing, true);
-      await popup.click('.sr-stage');
-      assert.equal((await readerState(popup)).playing, false);
+      await page.click('.sr-stage');
+      assert.equal((await readerState(page)).playing, true);
+      await page.click('.sr-stage');
+      assert.equal((await readerState(page)).playing, false);
     }, {settings: {wpm: 1000}});
   });
 
   it('stops at the end and starts over on Play', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
+      await openReader(page);
       // Forward stops at the last word.
       for (let index = 0; index < 12; index++) {
-        await popup.click('.sr-forward');
+        await page.click('.sr-forward');
       }
-      let state = await readerState(popup);
+      let state = await readerState(page);
       assert.equal(state.index, state.total);
-      await popup.click('.sr-back');
-      await startRecording(popup);
-      await popup.click('.sr-play');
-      await popup.waitForFunction(() => document.querySelector('.sr-play')
+      await page.click('.sr-back');
+      await startRecording(page);
+      await page.click('.sr-play');
+      await page.waitForFunction(() => reader('.sr-play')
           .getAttribute('aria-label') === 'Play');
-      state = await readerState(popup);
+      state = await readerState(page);
       assert.equal(state.index, state.total);
       assert.equal(state.remaining, '0:00 left');
-      assert.equal(await popup.evaluate(() =>
-        document.querySelector('.sr-fill').style.width), '100%');
+      assert.equal(await page.evaluate(() =>
+        reader('.sr-fill').style.width), '100%');
 
-      await popup.click('.sr-play');
-      const recorded = await popup.evaluate(() => window.recorded);
+      await page.click('.sr-play');
+      const recorded = await page.evaluate(() => window.recorded);
       assert.ok(recorded.at(-1).startsWith('Word 1 of'), recorded.at(-1));
-      await popup.click('.sr-play');
+      await page.click('.sr-play');
     }, {settings: {wpm: 1000}});
   });
 
   it('works with the keyboard without taking keys from controls',
       async () => {
         await withPage('speed-reader.html', async (page) => {
-          const popup = await openReader(page);
-          await popup.keyboard.press('ArrowRight');
-          assert.equal((await readerState(popup)).index, 11);
-          await popup.keyboard.press('ArrowLeft');
-          assert.equal((await readerState(popup)).index, 1);
-          await popup.keyboard.press('ArrowUp');
-          assert.equal(await popup.inputValue('.sr-wpm'), '325');
+          await openReader(page);
+          await page.keyboard.press('ArrowRight');
+          assert.equal((await readerState(page)).index, 11);
+          await page.keyboard.press('ArrowLeft');
+          assert.equal((await readerState(page)).index, 1);
+          await page.keyboard.press('ArrowUp');
+          assert.equal(await page.inputValue('.sr-wpm'), '325');
           assert.equal((await storedSettings(page)).wpm, 325);
-          await popup.keyboard.press('ArrowDown');
-          await popup.keyboard.press('ArrowDown');
-          assert.equal(await popup.textContent('.sr-wpm-value'), '275 wpm');
+          await page.keyboard.press('ArrowDown');
+          await page.keyboard.press('ArrowDown');
+          assert.equal(await page.textContent('.sr-wpm-value'), '275 wpm');
 
-          await popup.keyboard.press('Space');
-          assert.equal((await readerState(popup)).playing, true);
-          await popup.keyboard.press('Space');
-          assert.equal((await readerState(popup)).playing, false);
+          await page.keyboard.press('Space');
+          assert.equal((await readerState(page)).playing, true);
+          await page.keyboard.press('Space');
+          assert.equal((await readerState(page)).playing, false);
 
           // A clicked button keeps no focus: Space still toggles playback.
-          await popup.click('.sr-forward');
-          const index = (await readerState(popup)).index;
-          await popup.keyboard.press('Space');
-          assert.equal((await readerState(popup)).playing, true);
-          await popup.keyboard.press('Space');
-          assert.equal((await readerState(popup)).playing, false);
-          assert.ok((await readerState(popup)).index >= index);
+          await page.click('.sr-forward');
+          const index = (await readerState(page)).index;
+          await page.keyboard.press('Space');
+          assert.equal((await readerState(page)).playing, true);
+          await page.keyboard.press('Space');
+          assert.equal((await readerState(page)).playing, false);
+          assert.ok((await readerState(page)).index >= index);
 
           // A focused slider keeps its arrow keys.
-          const position = (await readerState(popup)).index;
-          await popup.focus('.sr-fontSize');
-          await popup.keyboard.press('ArrowRight');
-          assert.equal(await popup.inputValue('.sr-fontSize'), '52');
-          assert.equal((await readerState(popup)).index, position);
+          const position = (await readerState(page)).index;
+          await page.focus('.sr-fontSize');
+          await page.keyboard.press('ArrowRight');
+          assert.equal(await page.inputValue('.sr-fontSize'), '52');
+          assert.equal((await readerState(page)).index, position);
           assert.equal((await storedSettings(page)).fontSize, 52);
 
           // A focused button keeps Space (and presses itself).
-          await popup.focus('.sr-back');
-          await popup.keyboard.press('Space');
-          const state = await readerState(popup);
+          await page.focus('.sr-back');
+          await page.keyboard.press('Space');
+          const state = await readerState(page);
           assert.equal(state.playing, false);
           assert.equal(state.index, Math.max(1, position - 10));
 
           // The number field keeps every key.
-          await popup.focus('.sr-skip');
-          await popup.keyboard.press('ArrowLeft');
-          await popup.keyboard.press('Space');
-          assert.equal((await readerState(popup)).playing, false);
+          await page.focus('.sr-skip');
+          await page.keyboard.press('ArrowLeft');
+          await page.keyboard.press('Space');
+          assert.equal((await readerState(page)).playing, false);
         });
       });
 
-  it('pauses when the window is hidden', async () => {
+  it('keeps its keys from the page', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
-      await popup.click('.sr-play');
-      assert.equal((await readerState(popup)).playing, true);
-      await popup.evaluate(() => {
+      await page.evaluate(() => {
+        window.pageKeys = 0;
+        document.addEventListener('keydown', () => window.pageKeys++);
+      });
+      await openReader(page);
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('a');
+      assert.equal((await readerState(page)).index, 11);
+      assert.equal(await page.evaluate(() => window.pageKeys), 0);
+    });
+  });
+
+  it('pauses when the page is hidden', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.click('.sr-play');
+      assert.equal((await readerState(page)).playing, true);
+      await page.evaluate(() => {
         Object.defineProperty(document, 'visibilityState',
             {configurable: true, get: () => 'hidden'});
         document.dispatchEvent(new Event('visibilitychange'));
       });
-      assert.equal((await readerState(popup)).playing, false);
+      assert.equal((await readerState(page)).playing, false);
     });
   });
 });
@@ -404,60 +431,58 @@ describe('controls', () => {
 describe('settings', () => {
   it('apply at once and are stored', async () => {
     await withPage('speed-reader.html', async (page) => {
-      let popup = await openReader(page);
-      await popup.fill('.sr-fontSize', '72');
-      assert.equal(await popup.evaluate(() =>
-        document.querySelector('.sr-word').style.fontSize), '72px');
-      assert.equal(await popup.textContent('.sr-fontSize-value'), '72 px');
-      const remaining = (await readerState(popup)).remaining;
-      await popup.fill('.sr-wpm', '600');
-      assert.notEqual((await readerState(popup)).remaining, remaining);
-      await popup.fill('.sr-skip', '3');
-      await popup.click('.sr-forward');
-      assert.equal((await readerState(popup)).index, 4);
+      await openReader(page);
+      await page.fill('.sr-fontSize', '72');
+      assert.equal(await page.evaluate(() =>
+        reader('.sr-word').style.fontSize), '72px');
+      assert.equal(await page.textContent('.sr-fontSize-value'), '72 px');
+      const remaining = (await readerState(page)).remaining;
+      await page.fill('.sr-wpm', '600');
+      assert.notEqual((await readerState(page)).remaining, remaining);
+      await page.fill('.sr-skip', '3');
+      await page.click('.sr-forward');
+      assert.equal((await readerState(page)).index, 4);
       assert.deepEqual(await storedSettings(page),
           {wpm: 600, fontSize: 72, skip: 3});
 
-      await popup.close();
-      popup = await openReader(page);
-      assert.equal(await popup.inputValue('.sr-fontSize'), '72');
-      assert.equal(await popup.inputValue('.sr-wpm'), '600');
-      assert.equal(await popup.inputValue('.sr-skip'), '3');
+      await page.keyboard.press('Escape');
+      await openReader(page);
+      assert.equal(await page.inputValue('.sr-fontSize'), '72');
+      assert.equal(await page.inputValue('.sr-wpm'), '600');
+      assert.equal(await page.inputValue('.sr-skip'), '3');
     });
   });
 
   it('replaces invalid stored values', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
-      assert.equal(await popup.inputValue('.sr-wpm'), '1000');
-      assert.equal(await popup.inputValue('.sr-fontSize'), '48');
-      assert.equal(await popup.inputValue('.sr-skip'), '10');
+      await openReader(page);
+      assert.equal(await page.inputValue('.sr-wpm'), '1000');
+      assert.equal(await page.inputValue('.sr-fontSize'), '48');
+      assert.equal(await page.inputValue('.sr-skip'), '10');
     }, {settings: {wpm: 99999, fontSize: 'huge', skip: null}});
   });
 
   it('corrects an invalid skip value when the field is left', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
-      await popup.fill('.sr-skip', '500');
-      await popup.focus('.sr-wpm');
-      assert.equal(await popup.inputValue('.sr-skip'), '50');
+      await openReader(page);
+      await page.fill('.sr-skip', '500');
+      await page.focus('.sr-wpm');
+      assert.equal(await page.inputValue('.sr-skip'), '50');
       assert.equal((await storedSettings(page)).skip, 50);
     });
   });
 });
 
-describe('reader window', () => {
-  it('is reused by a second call from the same tab', async () => {
+describe('overlay', () => {
+  it('is reused by a second call', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
-      await popup.click('.sr-forward');
-      let popups = 0;
-      page.on('popup', () => popups++);
+      await openReader(page);
+      await page.click('.sr-forward');
       await page.evaluate((caption) => harnessRunMenuCommand(caption), MENU);
       // The same text keeps its place.
-      assert.equal((await readerState(popup)).index, 11);
+      assert.equal((await readerState(page)).index, 11);
 
-      await popup.click('.sr-play');
+      await page.click('.sr-play');
       await page.evaluate(() => {
         const range = document.createRange();
         range.selectNodeContents(document.querySelector('#title'));
@@ -465,132 +490,184 @@ describe('reader window', () => {
         getSelection().addRange(range);
       });
       await page.evaluate((caption) => harnessRunMenuCommand(caption), MENU);
-      const state = await readerState(popup);
+      const state = await readerState(page);
       assert.equal(state.word, 'Steam');
       assert.equal(state.total, 4);
       assert.equal(state.playing, false);
       // No timer of the old text keeps running.
       await delay(400);
-      assert.equal((await readerState(popup)).index, 1);
-      assert.equal(popups, 0);
-      assert.equal(page.context().pages().length, 2);
+      assert.equal((await readerState(page)).index, 1);
+      assert.equal(await page.locator('speed-reader').count(), 1);
     }, {settings: {wpm: 1000}});
   });
 
-  it('opens again after it was closed', async () => {
+  it('closes with its button, Escape and a click beside the panel',
+      async () => {
+        await withPage('speed-reader.html', async (page) => {
+          await openReader(page);
+          await page.click('.sr-forward');
+          await page.click('.sr-play');
+          await page.click('.sr-close');
+          assert.equal(await isOpen(page), false);
+
+          // Opened again, the same text continues where it was, paused.
+          await openReader(page);
+          let state = await readerState(page);
+          assert.ok(state.index >= 11, String(state.index));
+          assert.equal(state.playing, false);
+          await page.keyboard.press('Escape');
+          assert.equal(await isOpen(page), false);
+
+          await openReader(page);
+          await page.mouse.click(10, 10);
+          assert.equal(await isOpen(page), false);
+
+          // Dragging a slider out of the panel does not close it.
+          await openReader(page);
+          const box = await page.locator('.sr-wpm').boundingBox();
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+          await page.mouse.down();
+          await page.mouse.move(10, box.y + box.height / 2);
+          await page.mouse.up();
+          assert.equal(await isOpen(page), true);
+          assert.equal(await page.inputValue('.sr-wpm'), '100');
+        }, {settings: {wpm: 1000}});
+      });
+
+  it('keeps the page behind it inert and gives the focus back', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
-      await popup.close();
-      const second = await openReader(page);
-      assert.equal((await readerState(second)).word, 'Steam');
+      await page.focus('nav a');
+      await openReader(page);
+      const inside = () => page.evaluate(() =>
+        document.activeElement === document.querySelector('speed-reader'));
+      assert.equal(await page.evaluate(() => document.body.inert), true);
+      assert.equal(await inside(), true);
+      for (let index = 0; index < 12; index++) {
+        await page.keyboard.press('Tab');
+        assert.equal(await inside(), true);
+      }
+      await page.keyboard.press('Escape');
+      assert.deepEqual(await page.evaluate(() => ({
+        inert: document.body.inert,
+        focus: document.activeElement.textContent,
+      })), {inert: false, focus: 'Home'});
     });
   });
 
-  it('closes when the page is reloaded', async () => {
+  it('gives a page without a viewport one while it is open', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
-      await Promise.all([popup.waitForEvent('close'), page.reload()]);
-      assert.ok(popup.isClosed());
+      const viewport = () => page.evaluate(() =>
+        document.querySelector('meta[name="viewport"]')?.content ?? null);
+      assert.equal(await viewport(), null);
+      await openReader(page);
+      assert.equal(await viewport(),
+          'width=device-width, initial-scale=1, minimum-scale=1');
+      await page.click('.sr-close');
+      assert.equal(await viewport(), null);
     });
   });
 
   it('follows the color scheme', async () => {
     await withPage('speed-reader.html', async (page) => {
-      const popup = await openReader(page);
-      const background = () => popup.evaluate(() =>
-        getComputedStyle(document.body).backgroundColor);
-      await popup.emulateMedia({colorScheme: 'light'});
+      await openReader(page);
+      const background = () => page.evaluate(() =>
+        getComputedStyle(reader('.sr-panel')).backgroundColor);
+      await page.emulateMedia({colorScheme: 'light'});
       assert.equal(await background(), 'rgb(247, 246, 242)');
-      await popup.emulateMedia({colorScheme: 'dark'});
-      await popup.waitForFunction(() =>
-        getComputedStyle(document.body).backgroundColor ===
+      await page.emulateMedia({colorScheme: 'dark'});
+      await page.waitForFunction(() =>
+        getComputedStyle(reader('.sr-panel')).backgroundColor ===
             'rgb(22, 24, 27)');
     });
   });
 
-  it('fits long words into a phone-width window at the largest size',
-      async () => {
-        await withPage('speed-reader.html', async (page) => {
-          const popup = await openReader(page);
-          await popup.setViewportSize({width: 360, height: 640});
-          await popup.waitForFunction(() => window.innerWidth === 360);
-          await popup.evaluate(() => {
-            window.overflows = [];
-            const word = document.querySelector('.sr-word');
-            const stage = document.querySelector('.sr-stage');
-            const check = () => {
-              const box = word.getBoundingClientRect();
-              const frame = stage.getBoundingClientRect();
-              if (box.left < frame.left - 0.5 ||
-                  box.right > frame.right + 0.5) {
-                window.overflows.push(word.textContent);
-              }
-            };
-            new MutationObserver(check).observe(word,
-                {childList: true, subtree: true, attributes: true});
-          });
-          // Play through the paragraphs with long words.
-          await popup.evaluate(() => {
-            const forward = document.querySelector('.sr-forward');
-            for (let index = 0; index < 31; index++) forward.click();
-          });
-          await popup.click('.sr-play');
-          await popup.waitForFunction(() => /Word 6[4-9] of/.test(
-              document.querySelector('.sr-position').textContent));
-          await popup.click('.sr-play');
-          assert.deepEqual(await popup.evaluate(() => window.overflows), []);
-
-          const layout = await popup.evaluate(() => ({
-            scrollWidth: document.documentElement.scrollWidth,
-            width: window.innerWidth,
-            buttons: [...document.querySelectorAll('button, input')]
-                .map((element) => {
-                  const box = element.getBoundingClientRect();
-                  return {
-                    name: element.className,
-                    height: box.height,
-                    width: box.width,
-                    right: box.right,
-                  };
-                }),
-          }));
-          assert.ok(layout.scrollWidth <= layout.width,
-              `${layout.scrollWidth} > ${layout.width}`);
-          for (const button of layout.buttons) {
-            assert.ok(button.height >= 44, `${button.name}: ${button.height}`);
-            assert.ok(button.width >= 44, `${button.name}: ${button.width}`);
-            assert.ok(button.right <= layout.width, button.name);
+  it('fills a phone-width window and fits long words into it at the ' +
+      'largest size', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await page.setViewportSize({width: 360, height: 640});
+      await openReader(page);
+      await page.evaluate(() => {
+        window.overflows = [];
+        const word = reader('.sr-word');
+        const stage = reader('.sr-stage');
+        const check = () => {
+          const box = word.getBoundingClientRect();
+          const frame = stage.getBoundingClientRect();
+          if (box.left < frame.left - 0.5 || box.right > frame.right + 0.5) {
+            window.overflows.push(word.textContent);
           }
-        }, {settings: {wpm: 1000, fontSize: 96, skip: 1}});
+        };
+        new MutationObserver(check).observe(word,
+            {childList: true, subtree: true, attributes: true});
       });
+      // Play through the paragraphs with long words.
+      await page.evaluate(() => {
+        const forward = reader('.sr-forward');
+        for (let index = 0; index < 31; index++) forward.click();
+      });
+      await page.click('.sr-play');
+      await page.waitForFunction(() => /Word 6[4-9] of/.test(
+          reader('.sr-position').textContent));
+      await page.click('.sr-play');
+      assert.deepEqual(await page.evaluate(() => window.overflows), []);
+
+      const layout = await page.evaluate(() => {
+        const backdrop = reader('.sr-backdrop');
+        const panel = reader('.sr-panel').getBoundingClientRect();
+        return {
+          scrollWidth: backdrop.scrollWidth,
+          width: backdrop.clientWidth,
+          panel: {width: panel.width, height: panel.height},
+          buttons: [...backdrop.querySelectorAll('button, input')]
+              .map((element) => {
+                const box = element.getBoundingClientRect();
+                return {
+                  name: element.className,
+                  height: box.height,
+                  width: box.width,
+                  right: box.right,
+                };
+              }),
+        };
+      });
+      assert.ok(layout.scrollWidth <= layout.width,
+          `${layout.scrollWidth} > ${layout.width}`);
+      assert.equal(layout.panel.width, 360);
+      assert.ok(layout.panel.height >= 640, String(layout.panel.height));
+      for (const button of layout.buttons) {
+        assert.ok(button.height >= 44, `${button.name}: ${button.height}`);
+        assert.ok(button.width >= 44, `${button.name}: ${button.width}`);
+        assert.ok(button.right <= layout.width, button.name);
+      }
+    }, {settings: {wpm: 1000, fontSize: 96, skip: 1}});
+  });
 });
 
 describe('page with a strict style policy', () => {
   it('styles the reader inline', async () => {
     await withPage('speed-reader-csp.html', async (page) => {
-      const popup = await openReader(page);
-      // The policy applies in the reader window: style elements are blocked.
-      const blocked = await popup.evaluate(() => {
+      await openReader(page);
+      // The policy blocks style elements, also in the shadow root.
+      const blocked = await page.evaluate(() => {
         const style = document.createElement('style');
         style.textContent = '.probe { color: rgb(1, 2, 3); }';
-        document.head.append(style);
         const probe = document.createElement('span');
         probe.className = 'probe';
-        document.body.append(probe);
+        const panel = reader('.sr-panel');
+        panel.getRootNode().append(style);
+        panel.append(probe);
         const color = getComputedStyle(probe).color;
         probe.remove();
         style.remove();
         return color !== 'rgb(1, 2, 3)';
       });
-      assert.ok(blocked, 'the policy does not apply in the reader window');
-      const looks = await popup.evaluate(() => ({
-        word: document.querySelector('.sr-word').textContent,
-        fontSize: getComputedStyle(document.querySelector('.sr-word'))
-            .fontSize,
-        pivot: getComputedStyle(document.querySelector('.sr-pivot')).color,
-        play: document.querySelector('.sr-play').getBoundingClientRect()
-            .height,
-        background: getComputedStyle(document.body).backgroundColor,
+      assert.ok(blocked, 'the policy does not apply in the shadow root');
+      const looks = await page.evaluate(() => ({
+        word: reader('.sr-word').textContent,
+        fontSize: getComputedStyle(reader('.sr-word')).fontSize,
+        pivot: getComputedStyle(reader('.sr-pivot')).color,
+        play: reader('.sr-play').getBoundingClientRect().height,
+        background: getComputedStyle(reader('.sr-panel')).backgroundColor,
       }));
       assert.deepEqual(looks, {
         word: 'Strict',
@@ -603,52 +680,16 @@ describe('page with a strict style policy', () => {
   });
 });
 
-describe('blocked pop-up', () => {
-  it('shows a notice whose button opens the reader', async () => {
-    await withPage('speed-reader.html', async (page) => {
-      await page.evaluate(() => {
-        window.realOpen = window.open;
-        window.open = () => null;
-      });
-      await page.evaluate((caption) => harnessRunMenuCommand(caption), MENU);
-      const open = page.locator('speed-reader-notice .sr-open');
-      await open.waitFor();
-      await page.evaluate(() => {
-        window.open = window.realOpen;
-      });
-      const [popup] = await Promise.all([
-        page.waitForEvent('popup'),
-        open.click(),
-      ]);
-      await popup.waitForSelector('.sr-position', {state: 'attached'});
-      assert.equal((await readerState(popup)).word, 'Steam');
-      assert.equal(await page.locator('speed-reader-notice').count(), 0);
-    });
-  });
-
-  it('closes the notice', async () => {
-    await withPage('speed-reader.html', async (page) => {
-      await page.evaluate(() => {
-        window.realOpen = window.open;
-        window.open = () => null;
-      });
-      await page.evaluate((caption) => harnessRunMenuCommand(caption), MENU);
-      await page.locator('speed-reader-notice [aria-label="Close"]').click();
-      assert.equal(await page.locator('speed-reader-notice').count(), 0);
-    });
-  });
-});
-
 describe('page without text', () => {
   it('explains how to read anyway', async () => {
     await withPage('speed-reader-empty.html', async (page) => {
-      const popup = await openReader(page);
-      const state = await readerState(popup);
+      await openReader(page);
+      const state = await readerState(page);
       assert.match(state.message, /No text found/);
       assert.equal(state.total, 0);
-      assert.ok(await popup.isDisabled('.sr-play'));
-      await popup.keyboard.press('Space');
-      assert.equal((await readerState(popup)).playing, false);
+      assert.ok(await page.isDisabled('.sr-play'));
+      await page.keyboard.press('Space');
+      assert.equal((await readerState(page)).playing, false);
     });
   });
 });
