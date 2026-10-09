@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reading Ruler
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.3.1
+// @version      1.3.2
 // @description  Highlights one line of an article at a time: click or tap a line, then move with the arrow keys
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -9,6 +9,7 @@
 // @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiMyYjJmMzYiLz48ZyBmaWxsPSIjOWFhM2FkIj48cmVjdCB4PSIxNCIgeT0iMTMiIHdpZHRoPSIzNiIgaGVpZ2h0PSI1IiByeD0iMi41Ii8+PHJlY3QgeD0iMTQiIHk9IjQ0IiB3aWR0aD0iMzYiIGhlaWdodD0iNSIgcng9IjIuNSIvPjxyZWN0IHg9IjE0IiB5PSI1NCIgd2lkdGg9IjI0IiBoZWlnaHQ9IjUiIHJ4PSIyLjUiIG9wYWNpdHk9Ii42Ii8+PHJlY3QgeD0iMTQiIHk9IjMiIHdpZHRoPSIzMCIgaGVpZ2h0PSI1IiByeD0iMi41IiBvcGFjaXR5PSIuNiIvPjwvZz48cmVjdCB4PSI2IiB5PSIyNCIgd2lkdGg9IjUyIiBoZWlnaHQ9IjE1IiByeD0iNCIgZmlsbD0iI2ZmYzQwMCIvPjxyZWN0IHg9IjE0IiB5PSIyOSIgd2lkdGg9IjM2IiBoZWlnaHQ9IjUiIHJ4PSIyLjUiIGZpbGw9IiMyYjJmMzYiLz48L3N2Zz4K
 // @updateURL    https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/reading-ruler.user.js
 // @downloadURL  https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/reading-ruler.user.js
+// @require      https://raw.githubusercontent.com/JulWit/userscripts/main/lib/content-detection.js?v=1.0.0
 // @match        *://*/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -69,31 +70,6 @@
    *     height: number}} Placement */
 
   /**
-   * Paragraph below a candidate container; depth 0 is a direct child.
-   * @typedef {{textLength: number, commaCount: number,
-   *     depth: number}} ParagraphFeatures
-   */
-
-  /**
-   * Input of the Readability-like container score. name holds the element's
-   * ID and classes.
-   * @typedef {{tagName: string, name: string,
-   *     paragraphs: !Array<!ParagraphFeatures>,
-   *     linkDensity: number}} ContainerFeatures
-   */
-
-  /**
-   * Scored container; parent is the index of the nearest candidate ancestor
-   * or -1.
-   * @typedef {{score: number, parent: number}} ScoredCandidate
-   */
-
-  /**
-   * Semantic container (article, main); textLength counts paragraph text.
-   * @typedef {{textLength: number, parent: number}} SemanticCandidate
-   */
-
-  /**
    * @typedef {{lineTop: number, lineBottom: number, bandTop: number,
    *     bandBottom: number, scrollTop: number,
    *     maxScrollTop: number}} ScrollInput
@@ -142,42 +118,6 @@
   }
 
   const CONFIG = deepFreeze({
-    // Elements whose rendered lines can be selected.
-    blockTags: ['p', 'li', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-      'dt', 'dd'],
-    headingTags: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
-    // Elements that may hold body text without paragraphs. For the content
-    // detection they count as paragraphs only if they break their text with
-    // <br> (or are <pre>): table cells and divs of web apps hold text too,
-    // but not prose. If they also contain blocks, each run of their own text
-    // between those blocks counts as a paragraph.
-    textContainerTags: ['div', 'section', 'td', 'pre', 'figcaption'],
-    // Text outside every block tag belongs to its nearest ancestor with one
-    // of these computed display values.
-    blockDisplays: ['block', 'flow-root', 'list-item', 'table-cell',
-      'table-caption'],
-    // Subtrees without body text. A header is only skipped outside an
-    // article: inside, it holds the article's title.
-    excludedTags: ['nav', 'aside', 'footer', 'button', 'select', 'textarea',
-      'input', 'label', 'option', 'script', 'style', 'noscript', 'template',
-      'svg', 'math', 'canvas', 'video', 'audio', 'iframe', 'object', 'embed'],
-    excludedRoles: ['navigation', 'complementary', 'banner', 'contentinfo',
-      'menu', 'menubar', 'search'],
-    // Words in class names or IDs of non-content elements. A word matches if
-    // it starts or ends with one of them ("navbar", "subnav", "comments").
-    negativeNames: ['sidebar', 'menu', 'nav', 'comment', 'footer', 'promo',
-      'related', 'share'],
-    // Advertisement words, only as whole words: "ad" is part of "header".
-    adNames: ['ad', 'ads', 'adbox', 'adslot', 'adunit', 'adsense', 'advert',
-      'adverts', 'advertisement', 'advertising', 'sponsor', 'sponsored'],
-    // Words that keep an element despite a negative word, e.g. the wrapper
-    // "content-with-sidebar" (like Readability's "maybe a candidate"). Not
-    // "main": "main-menu" is a menu.
-    keepNames: ['article', 'body', 'content'],
-    // Words that raise a container's score (Readability).
-    positiveNames: ['article', 'blog', 'body', 'content', 'entry', 'main',
-      'page', 'post', 'story', 'text'],
-
     // Fragments on one line overlap vertically by at least this share of the
     // smaller height (superscripts, mixed font sizes).
     lineOverlap: 0.5,
@@ -187,34 +127,9 @@
     // Space around the highlighted line in CSS pixels. The vertical padding
     // is a share of the line height within limits.
     padding: {x: 6, yShare: 0.2, yMin: 2, yMax: 8},
-    // Blocks with a larger share of link text are skipped (except headings).
-    maxLinkDensity: 0.5,
-
-    // Readability-like scoring of content containers: paragraphs shorter than
-    // minParagraphLength are ignored, scores are passed up maxDepth levels.
-    // The parent of the best container wins if it scores at least
-    // parentRatio of the best score, or if a sibling scores siblingRatio.
-    // The winner needs minText characters of paragraph text; pages without
-    // such a container (web apps, link lists) are left alone.
-    scoring: {
-      minParagraphLength: 25,
-      maxDepth: 5,
-      parentRatio: 0.75,
-      siblingRatio: 0.2,
-      minText: 500,
-    },
     // Minimum time between two detections of the content root in ms, while
     // the page keeps changing its DOM.
     redetectInterval: 1000,
-    // An article or main element needs this much paragraph text. A nested
-    // one is preferred if it holds semanticDominance of the outer's text.
-    minSemanticText: 250,
-    semanticDominance: 0.7,
-    // Fixed or sticky elements narrower or lower than this share of the
-    // viewport are widgets (headers, sidebars); larger ones are layout shells
-    // that contain the whole page.
-    widgetShare: 0.6,
-
     // Search for fixed and sticky headers/footers that cover the viewport:
     // rows of points are probed from each edge inwards, every probeStep px
     // and past every element found, within the top and bottom share of the
@@ -590,258 +505,6 @@
   }
 
   /**
-   * Splits the ID and class names of an element into lower-case words: the
-   * parts between punctuation ("article-body" → "article", "body"), and their
-   * camel-case parts ("sideBar" → "sidebar", "side", "bar").
-   * @param {string} name
-   * @return {!Array<string>}
-   */
-  function nameTokens(name) {
-    const tokens = new Set();
-    for (const chunk of name.split(/[^A-Za-z0-9]+/)) {
-      if (!chunk) continue;
-      tokens.add(chunk.toLowerCase());
-      for (const part of chunk.split(/(?<=[a-z0-9])(?=[A-Z])/)) {
-        tokens.add(part.toLowerCase());
-      }
-    }
-    return [...tokens];
-  }
-
-  /**
-   * @param {!Array<string>} tokens
-   * @param {!ReadonlyArray<string>} words
-   * @return {boolean} Whether a token starts or ends with one of the words.
-   */
-  function hasAffix(tokens, words) {
-    return tokens.some((token) => words.some((word) => token.startsWith(word) ||
-        token.endsWith(word) || token.endsWith(`${word}s`)));
-  }
-
-  /**
-   * @param {!Array<string>} tokens
-   * @return {boolean} Whether the words suggest a non-content element.
-   */
-  function hasNegativeName(tokens) {
-    return hasAffix(tokens, CONFIG.negativeNames) ||
-        tokens.some((token) => CONFIG.adNames.includes(token));
-  }
-
-  /**
-   * Whether an element's ID and classes mark it as a sidebar, menu, comment
-   * section, ad etc.
-   * @param {string} name ID and class names.
-   * @return {boolean}
-   */
-  function isExcludedName(name) {
-    const tokens = nameTokens(name);
-    return hasNegativeName(tokens) && !tokens.some((token) =>
-      CONFIG.keepNames.some((word) => token.startsWith(word)));
-  }
-
-  /**
-   * Score bonus or penalty from ID and class names (Readability: ±25).
-   * @param {string} name
-   * @return {number}
-   */
-  function classWeight(name) {
-    const tokens = nameTokens(name);
-    let weight = 0;
-    if (tokens.some((token) =>
-      CONFIG.positiveNames.some((word) => token.startsWith(word)))) {
-      weight += 25;
-    }
-    if (hasNegativeName(tokens)) weight -= 25;
-    return weight;
-  }
-
-  /**
-   * @param {string} text
-   * @return {number} Number of commas, including CJK and Arabic commas.
-   */
-  function countCommas(text) {
-    return (text.match(/[,،、，]/g) || []).length;
-  }
-
-  /**
-   * Whether an element without nested blocks counts as a paragraph for the
-   * content detection.
-   * @param {string} tagName Lower case.
-   * @param {boolean} hasLineBreak Whether it has a <br> child.
-   * @return {boolean}
-   */
-  function countsAsParagraph(tagName, hasLineBreak) {
-    return CONFIG.blockTags.includes(tagName) || tagName === 'pre' ||
-        (CONFIG.textContainerTags.includes(tagName) && hasLineBreak);
-  }
-
-  /**
-   * Whether a container holds enough paragraph text to be the content root.
-   * @param {!Array<{textLength: number}>} paragraphs
-   * @return {boolean}
-   */
-  function hasEnoughText(paragraphs) {
-    let total = 0;
-    for (const paragraph of paragraphs) total += paragraph.textLength;
-    return total >= CONFIG.scoring.minText;
-  }
-
-  /**
-   * Content score of one paragraph (Readability): one point, one per comma
-   * and one per 100 characters, up to three.
-   * @param {{textLength: number, commaCount: number}} paragraph
-   * @return {number}
-   */
-  function paragraphScore(paragraph) {
-    if (paragraph.textLength < CONFIG.scoring.minParagraphLength) return 0;
-    return 1 + paragraph.commaCount +
-        Math.min(Math.floor(paragraph.textLength / 100), 3);
-  }
-
-  /**
-   * Share of a paragraph's score that an ancestor receives: the parent all,
-   * the grandparent half, then 1 / (3 · depth).
-   * @param {number} depth 0 for the parent.
-   * @return {number}
-   */
-  function ancestorShare(depth) {
-    if (depth === 0) return 1;
-    if (depth === 1) return 0.5;
-    return 1 / (depth * 3);
-  }
-
-  /**
-   * @param {string} tagName Lower case.
-   * @return {number} Initial score by element type (Readability).
-   */
-  function tagBaseScore(tagName) {
-    switch (tagName) {
-      case 'div':
-      case 'article':
-        return 5;
-      case 'pre':
-      case 'td':
-      case 'blockquote':
-        return 3;
-      case 'address':
-      case 'ol':
-      case 'ul':
-      case 'dl':
-      case 'dd':
-      case 'dt':
-      case 'li':
-      case 'form':
-        return -3;
-      case 'h1':
-      case 'h2':
-      case 'h3':
-      case 'h4':
-      case 'h5':
-      case 'h6':
-      case 'th':
-        return -5;
-      default:
-        return 0;
-    }
-  }
-
-  /**
-   * Readability-like score of a content container: element type, class
-   * names, amount of text, paragraphs and commas, reduced by the share of
-   * link text.
-   * @param {!ContainerFeatures} features
-   * @return {number}
-   */
-  function scoreContainer(features) {
-    let score = tagBaseScore(features.tagName) + classWeight(features.name);
-    for (const paragraph of features.paragraphs) {
-      score += paragraphScore(paragraph) * ancestorShare(paragraph.depth);
-    }
-    return score * (1 - clamp(features.linkDensity, 0, 1));
-  }
-
-  /**
-   * Picks the content container from scored candidates. Starts with the best
-   * score and moves to the parent if it scores almost as well or holds
-   * another substantial candidate (text split into sections).
-   * @param {!Array<!ScoredCandidate>} candidates
-   * @return {number} Index, -1 if no candidate has a positive score.
-   */
-  function pickBestCandidate(candidates) {
-    let best = -1;
-    candidates.forEach((candidate, index) => {
-      if (candidate.score > 0 &&
-          (best < 0 || candidate.score > candidates[best].score)) {
-        best = index;
-      }
-    });
-    if (best < 0) return -1;
-    const top = candidates[best].score;
-    const parent = candidates[best].parent;
-    if (parent < 0) return best;
-    const hasSibling = candidates.some((candidate, index) =>
-      index !== best && candidate.parent === parent &&
-        candidate.score >= top * CONFIG.scoring.siblingRatio);
-    if (hasSibling) return parent;
-    while (candidates[best].parent >= 0 &&
-        candidates[candidates[best].parent].score >=
-            top * CONFIG.scoring.parentRatio) {
-      best = candidates[best].parent;
-    }
-    return best;
-  }
-
-  /**
-   * @param {!Array<{parent: number}>} candidates
-   * @param {number} index
-   * @param {number} ancestor
-   * @return {boolean} Whether candidate ancestor contains candidate index.
-   */
-  function isDescendant(candidates, index, ancestor) {
-    let current = candidates[index].parent;
-    for (let guard = 0; current >= 0 && guard < candidates.length; guard++) {
-      if (current === ancestor) return true;
-      current = candidates[current].parent;
-    }
-    return false;
-  }
-
-  /**
-   * Picks the content root among semantic elements (article, main): the one
-   * with the most text, or a nested one that holds most of that text (an
-   * article inside main next to a short comment section). Several articles
-   * of similar size keep their common container, so moving between them
-   * works.
-   * @param {!Array<!SemanticCandidate>} candidates
-   * @return {number} Index or -1.
-   */
-  function chooseSemanticRoot(candidates) {
-    let best = -1;
-    candidates.forEach((candidate, index) => {
-      if (candidate.textLength >= CONFIG.minSemanticText &&
-          (best < 0 || candidate.textLength > candidates[best].textLength)) {
-        best = index;
-      }
-    });
-    while (best >= 0) {
-      let child = -1;
-      candidates.forEach((candidate, index) => {
-        if (isDescendant(candidates, index, best) &&
-            (child < 0 ||
-             candidate.textLength > candidates[child].textLength)) {
-          child = index;
-        }
-      });
-      if (child < 0 || candidates[child].textLength <
-          candidates[best].textLength * CONFIG.semanticDominance) {
-        break;
-      }
-      best = child;
-    }
-    return best;
-  }
-
-  /**
    * Finds fixed and sticky elements at the top and bottom edges of a view.
    * Rows of points are probed from each edge inwards: a row continues past
    * the elements it hits (a header needs one row, not one per probeStep),
@@ -994,17 +657,6 @@
     isOutsideBand,
     isInsideBand,
     probeHeights,
-    nameTokens,
-    isExcludedName,
-    classWeight,
-    countCommas,
-    countsAsParagraph,
-    hasEnoughText,
-    paragraphScore,
-    ancestorShare,
-    scoreContainer,
-    pickBestCandidate,
-    chooseSemanticRoot,
     probeEdges,
     uncoveredBand,
     computeScrollTarget,
@@ -1039,14 +691,6 @@
    */
 
   /**
-   * Per-operation caches: page styles can change at any time, so they only
-   * live for one click, key press or refresh.
-   * @typedef {{style: !WeakMap<!Element, !CSSStyleDeclaration>,
-   *     exclusion: !WeakMap<!Element, string>,
-   *     linkDensity: !WeakMap<!Element, number>}} Caches
-   */
-
-  /**
    * Mutable state of the script.
    * @typedef {Object} State
    * @property {boolean} enabled Whether the input listeners are attached.
@@ -1069,17 +713,7 @@
    * @property {?MutationObserver} mutationObserver
    * @property {?Element} observedBlock Selected block, observed for resizes.
    * @property {?Element} observedRoot Content root, observed for mutations.
-   * @property {!Caches} caches
    */
-
-  /** @return {!Caches} */
-  function newCaches() {
-    return {
-      style: new WeakMap(),
-      exclusion: new WeakMap(),
-      linkDensity: new WeakMap(),
-    };
-  }
 
   /** @type {!State} */
   const state = {
@@ -1097,26 +731,26 @@
     mutationObserver: null,
     observedBlock: null,
     observedRoot: null,
-    caches: newCaches(),
   };
+
+  // Content detection (lib/content-detection.js). Its caches only live for
+  // one click, key press or refresh: page styles can change at any time.
+  const detector = ContentDetection.createDetector({
+    codeBlocks: 'text',
+    skipAriaHidden: false,
+    skipFootnoteReferences: false,
+    requireBlockLikeRoot: true,
+  });
 
   /** Starts an operation with fresh caches. */
   function beginOperation() {
-    state.caches = newCaches();
+    detector.resetCaches();
   }
 
   // ===========================================================================
   // Classifying elements and text
   // ===========================================================================
 
-  const BLOCK_TAGS = new Set(CONFIG.blockTags);
-  const HEADING_TAGS = new Set(CONFIG.headingTags);
-  const EXCLUDED_TAGS = new Set(CONFIG.excludedTags);
-  const EXCLUDED_ROLES = new Set(CONFIG.excludedRoles);
-  // Paragraph-like elements for the content detection.
-  const PARAGRAPH_SELECTOR =
-      [...CONFIG.blockTags, ...CONFIG.textContainerTags].join(', ');
-  const SEMANTIC_SELECTOR = 'article, main, [role="main"]';
   // Clicks on these keep their normal behavior.
   const INTERACTIVE_SELECTOR = [
     'a[href]', 'button', 'input', 'select', 'textarea', 'label', 'summary',
@@ -1142,61 +776,12 @@
     'audio', 'iframe', 'object', 'embed']);
 
   /**
-   * Cached getComputedStyle.
+   * Cached getComputedStyle (cleared by beginOperation).
    * @param {!Element} element
    * @return {!CSSStyleDeclaration}
    */
   function styleOf(element) {
-    let style = state.caches.style.get(element);
-    if (!style) {
-      style = getComputedStyle(element);
-      state.caches.style.set(element, style);
-    }
-    return style;
-  }
-
-  /**
-   * @param {!Element} element
-   * @return {string} ID and class names.
-   */
-  function nameOf(element) {
-    return `${element.id} ${element.getAttribute('class') || ''}`;
-  }
-
-  /**
-   * @param {!Element} element
-   * @return {string} Text with collapsed white space.
-   */
-  function normalizedText(element) {
-    return (element.textContent || '').replace(/\s+/g, ' ').trim();
-  }
-
-  /**
-   * Whether a fixed or sticky element is a widget (header, toolbar, sidebar)
-   * rather than a layout shell that contains the whole page.
-   * @param {!Element} element
-   * @return {boolean}
-   */
-  function isWidgetSized(element) {
-    const rect = element.getBoundingClientRect();
-    return rect.width < window.innerWidth * CONFIG.widgetShare ||
-        rect.height < window.innerHeight * CONFIG.widgetShare;
-  }
-
-  /**
-   * Whether an element is hidden visually but kept for screen readers
-   * (absolutely positioned and clipped or 1 px small).
-   * @param {!Element} element
-   * @param {!CSSStyleDeclaration} style
-   * @return {boolean}
-   */
-  function isVisuallyHidden(element, style) {
-    if (style.position !== 'absolute' && style.position !== 'fixed') {
-      return false;
-    }
-    if (style.clip && style.clip !== 'auto') return true;
-    const rect = element.getBoundingClientRect();
-    return rect.width <= 1 || rect.height <= 1;
+    return detector.styleOf(element);
   }
 
   /**
@@ -1205,101 +790,8 @@
    *     (landmark, control, hidden, fixed …), 'name' (only its ID or classes
    *     suggest so) or '' if it may contain body text.
    */
-  function computeExclusion(element) {
-    const tag = element.localName;
-    if (EXCLUDED_TAGS.has(tag)) return 'hard';
-    if (tag === 'header' && !element.parentElement?.closest('article')) {
-      return 'hard';
-    }
-    const role = (element.getAttribute('role') || '').trim().toLowerCase()
-        .split(/\s+/)[0];
-    if (EXCLUDED_ROLES.has(role)) return 'hard';
-    if (element instanceof HTMLElement && element.isContentEditable) {
-      return 'hard';
-    }
-    const style = styleOf(element);
-    if (style.display === 'none' || style.visibility === 'hidden' ||
-        style.visibility === 'collapse') {
-      return 'hard';
-    }
-    // Sticky headings and paragraphs (section titles that stick while their
-    // section scrolls by) are text, not widgets.
-    const pinned = style.position === 'fixed' ||
-        (style.position === 'sticky' && !BLOCK_TAGS.has(tag));
-    if (pinned && isWidgetSized(element)) return 'hard';
-    if (isVisuallyHidden(element, style)) return 'hard';
-    if (isExcludedName(nameOf(element))) return 'name';
-    return '';
-  }
-
-  /**
-   * Cached computeExclusion.
-   * @param {!Element} element
-   * @return {string}
-   */
   function exclusionOf(element) {
-    let result = state.caches.exclusion.get(element);
-    if (result === undefined) {
-      result = computeExclusion(element);
-      state.caches.exclusion.set(element, result);
-    }
-    return result;
-  }
-
-  /**
-   * @param {!Element} element
-   * @return {number} Share of the element's text inside links.
-   */
-  function linkDensityOf(element) {
-    let result = state.caches.linkDensity.get(element);
-    if (result === undefined) {
-      result = 0;
-      const length = normalizedText(element).length;
-      if (length) {
-        let links = 0;
-        for (const link of element.querySelectorAll('a')) {
-          links += normalizedText(link).length;
-        }
-        result = links / length;
-      }
-      state.caches.linkDensity.set(element, result);
-    }
-    return result;
-  }
-
-  /**
-   * Whether a block consists mostly of links (link lists, "read more").
-   * Headings are never link-heavy: a linked title is still a title.
-   * @param {!Element} block
-   * @return {boolean}
-   */
-  function isLinkHeavy(block) {
-    return !HEADING_TAGS.has(block.localName) &&
-        linkDensityOf(block) > CONFIG.maxLinkDensity;
-  }
-
-  /**
-   * @param {!Element} element
-   * @return {boolean} Whether the element is laid out as a block, so that
-   *     text directly inside it forms lines of its own.
-   */
-  function isBlockLike(element) {
-    return CONFIG.blockDisplays.includes(styleOf(element).display);
-  }
-
-  /**
-   * Whether an element and its ancestors below a container may contain body
-   * text.
-   * @param {!Element} element
-   * @param {!Element} container Not checked itself.
-   * @return {boolean}
-   */
-  function isIncluded(element, container) {
-    for (let node = /** @type {?Element} */ (element);
-      node && node !== container; node = node.parentElement) {
-      if (exclusionOf(node)) return false;
-    }
-    return true;
+    return detector.exclusionOf(element);
   }
 
   /**
@@ -1313,202 +805,15 @@
    * @return {?Element}
    */
   function blockOf(text, root) {
-    if (!/\S/.test(text.data) || !root.contains(text)) return null;
-    /** @type {?Element} */
-    let block = null;
-    /** @type {?Element} */
-    let container = null;
-    for (let element = text.parentElement; element && element !== root;
-      element = element.parentElement) {
-      if (exclusionOf(element)) return null;
-      if (block) continue;
-      if (BLOCK_TAGS.has(element.localName)) {
-        block = element;
-      } else if (!container && isBlockLike(element)) {
-        container = element;
-      }
-    }
-    if (!block && BLOCK_TAGS.has(root.localName)) block = root;
-    if (!block) block = container || (isBlockLike(root) ? root : null);
-    if (!block || isLinkHeavy(block) ||
-        !isHorizontalWritingMode(styleOf(block).writingMode)) {
-      return null;
-    }
-    return block;
+    const block = detector.blockOf(text, root);
+    return block && isHorizontalWritingMode(styleOf(block).writingMode) ?
+        block :
+        null;
   }
 
   // ===========================================================================
-  // Content root (Readability-like heuristics)
+  // Content root (Readability-like heuristics, lib/content-detection.js)
   // ===========================================================================
-
-  /**
-   * Text directly inside a text container, outside its nested
-   * paragraph-like elements: split at those elements into runs, like the
-   * paragraphs Readability wraps such text in. Excluded children and runs
-   * that consist mostly of links are left out.
-   * @param {!Element} element
-   * @return {!Array<string>} Runs with collapsed white space.
-   */
-  function looseTextRuns(element) {
-    /** @type {!Array<string>} */
-    const runs = [];
-    /** @type {!Array<string>} */
-    let parts = [];
-    let linkLength = 0;
-    const flush = () => {
-      const text = parts.join(' ').replace(/\s+/g, ' ').trim();
-      if (text && linkLength / text.length <= CONFIG.maxLinkDensity) {
-        runs.push(text);
-      }
-      parts = [];
-      linkLength = 0;
-    };
-    for (const child of element.childNodes) {
-      if (child.nodeType === Node.TEXT_NODE) {
-        parts.push(/** @type {!Text} */ (child).data);
-      } else if (child instanceof Element) {
-        if (child.matches(PARAGRAPH_SELECTOR) ||
-            child.querySelector(PARAGRAPH_SELECTOR)) {
-          flush();
-        } else if (!exclusionOf(child)) {
-          parts.push(child.textContent || '');
-          const links = child.localName === 'a' ?
-              [child] :
-              child.querySelectorAll('a');
-          for (const link of links) linkLength += normalizedText(link).length;
-        }
-      }
-    }
-    flush();
-    return runs;
-  }
-
-  /**
-   * Paragraphs below a container for the content detection: paragraph-like
-   * elements without nested ones (paragraphs, list items, headings, and
-   * text containers that break their text into lines, see
-   * countsAsParagraph), and the runs of text that a text container with
-   * nested ones breaks into lines next to them (looseTextRuns). Paragraphs
-   * outside the body text and link-heavy ones are left out.
-   * @param {!Element} container
-   * @return {!Array<{text: string, parent: ?Element}>} parent is the first
-   *     element whose score the paragraph raises.
-   */
-  function paragraphsIn(container) {
-    /** @type {!Array<{text: string, parent: ?Element}>} */
-    const paragraphs = [];
-    for (const element of container.querySelectorAll(PARAGRAPH_SELECTOR)) {
-      const hasLineBreak = !!element.querySelector(':scope > br');
-      const nested = !!element.querySelector(PARAGRAPH_SELECTOR);
-      const counts = nested ?
-          hasLineBreak && CONFIG.textContainerTags.includes(element.localName) :
-          countsAsParagraph(element.localName, hasLineBreak);
-      if (!counts || !isIncluded(element, container)) continue;
-      if (nested) {
-        for (const text of looseTextRuns(element)) {
-          paragraphs.push({text, parent: element});
-        }
-      } else if (!isLinkHeavy(element)) {
-        paragraphs.push({
-          text: normalizedText(element),
-          parent: element.parentElement,
-        });
-      }
-    }
-    return paragraphs;
-  }
-
-  /**
-   * Whether an element can be the content root: visible, not excluded
-   * itself and not inside a landmark, control or hidden element. Class names
-   * of ancestors are not checked: wrappers such as "page-with-sidebar"
-   * contain the content.
-   * @param {!Element} element
-   * @return {boolean}
-   */
-  function isRootCandidate(element) {
-    if (!element.getClientRects().length || exclusionOf(element)) return false;
-    for (let node = element.parentElement;
-      node && node !== document.documentElement; node = node.parentElement) {
-      if (exclusionOf(node) === 'hard') return false;
-    }
-    return true;
-  }
-
-  /**
-   * Finds the content root among article, main and [role="main"].
-   * @return {?Element}
-   */
-  function findSemanticRoot() {
-    const elements = [...document.querySelectorAll(SEMANTIC_SELECTOR)]
-        .filter(isRootCandidate);
-    const indices = new Map(elements.map((element, index) => [element, index]));
-    /** @type {!Array<!SemanticCandidate>} */
-    const candidates = elements.map((element) => {
-      let textLength = 0;
-      for (const paragraph of paragraphsIn(element)) {
-        textLength += paragraph.text.length;
-      }
-      let ancestor = element.parentElement?.closest(SEMANTIC_SELECTOR);
-      while (ancestor && !indices.has(ancestor)) {
-        ancestor = ancestor.parentElement?.closest(SEMANTIC_SELECTOR);
-      }
-      return {textLength, parent: ancestor ? indices.get(ancestor) ?? -1 : -1};
-    });
-    const index = chooseSemanticRoot(candidates);
-    return index >= 0 ? elements[index] : null;
-  }
-
-  /**
-   * Finds the content root by scoring the ancestors of all paragraphs, like
-   * Readability.
-   * @return {?Element} null if no container holds enough text.
-   */
-  function findScoredRoot() {
-    const body = /** @type {!HTMLElement} */ (document.body);
-    /** @type {!Map<!Element, !ContainerFeatures>} */
-    const features = new Map();
-    for (const {text, parent} of paragraphsIn(body)) {
-      if (text.length < CONFIG.scoring.minParagraphLength) continue;
-      let ancestor = parent;
-      for (let depth = 0; ancestor && ancestor !== document.documentElement &&
-        depth < CONFIG.scoring.maxDepth; depth++) {
-        let entry = features.get(ancestor);
-        if (!entry) {
-          entry = {
-            tagName: ancestor.localName,
-            name: nameOf(ancestor),
-            paragraphs: [],
-            linkDensity: 0,
-          };
-          features.set(ancestor, entry);
-        }
-        entry.paragraphs.push({
-          textLength: text.length,
-          commaCount: countCommas(text),
-          depth,
-        });
-        ancestor = ancestor.parentElement;
-      }
-    }
-    const elements = [...features.keys()];
-    const indices = new Map(elements.map((element, index) => [element, index]));
-    const candidates = elements.map((element) => {
-      const entry = /** @type {!ContainerFeatures} */ (features.get(element));
-      entry.linkDensity = linkDensityOf(element);
-      let parent = element.parentElement;
-      while (parent && !features.has(parent)) parent = parent.parentElement;
-      return {
-        score: scoreContainer(entry),
-        parent: parent ? indices.get(parent) ?? -1 : -1,
-      };
-    });
-    const index = pickBestCandidate(candidates);
-    if (index < 0) return null;
-    const element = elements[index];
-    const entry = /** @type {!ContainerFeatures} */ (features.get(element));
-    return hasEnoughText(entry.paragraphs) ? element : null;
-  }
 
   /**
    * Marks the content root as outdated on the next change of the DOM. The
@@ -1546,7 +851,7 @@
           Date.now() - cached.time >= CONFIG.redetectInterval)) {
       return cached.element;
     }
-    const element = findSemanticRoot() || findScoredRoot();
+    const element = detector.findRoot();
     state.root = {element, key, time: Date.now()};
     watchRoot();
     return element;

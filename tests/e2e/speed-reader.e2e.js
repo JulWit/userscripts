@@ -404,12 +404,91 @@ describe('controls', () => {
       await page.evaluate(() => {
         window.pageKeys = 0;
         document.addEventListener('keydown', () => window.pageKeys++);
+        // Also listeners on the window in the capture phase, which run
+        // before any listener in the reader.
+        window.addEventListener('keydown', () => window.pageKeys++, true);
+        window.addEventListener('keyup', () => window.pageKeys++, true);
       });
       await openReader(page);
       await page.keyboard.press('ArrowRight');
       await page.keyboard.press('a');
       assert.equal((await readerState(page)).index, 11);
       assert.equal(await page.evaluate(() => window.pageKeys), 0);
+      // Closed, the reader leaves the keys to the page again.
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('a');
+      assert.ok(await page.evaluate(() => window.pageKeys) > 0);
+    });
+  });
+
+  it('keeps clicks and wheel events from the page', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await page.evaluate(() => {
+        window.pageEvents = 0;
+        for (const type of ['click', 'pointerdown', 'wheel']) {
+          document.addEventListener(type, () => window.pageEvents++);
+        }
+      });
+      await openReader(page);
+      await page.click('.sr-forward');
+      await page.mouse.move(500, 350);
+      await page.mouse.wheel(0, 200);
+      assert.equal(await page.evaluate(() => window.pageEvents), 0);
+    });
+  });
+
+  it('resumes a few words back after a pause', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.click('.sr-play');
+      // Pause in the middle of the sentence of words 20 to 31 ("Ships …
+      // banks.").
+      await page.waitForFunction(() => /Word 2[4-7] of/.test(
+          reader('.sr-position').textContent));
+      await page.click('.sr-play');
+      const paused = (await readerState(page)).index;
+      assert.ok(paused >= 24 && paused <= 31, String(paused));
+      await page.click('.sr-play');
+      const resumed = (await readerState(page)).index;
+      await page.click('.sr-play');
+      assert.equal(resumed, Math.max(20, paused - 5));
+    }, {settings: {wpm: 600}});
+  });
+
+  it('skips on a tap near the edges of the word', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      const tap = (share) => page.evaluate((share) => {
+        const stage = reader('.sr-stage');
+        const box = stage.getBoundingClientRect();
+        stage.dispatchEvent(new PointerEvent('pointerdown',
+            {bubbles: true, composed: true, pointerType: 'touch'}));
+        stage.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          composed: true,
+          clientX: box.left + box.width * share,
+          clientY: box.top + box.height / 2,
+        }));
+      }, share);
+      await tap(0.95);
+      assert.equal((await readerState(page)).index, 4);
+      await tap(0.05);
+      assert.equal((await readerState(page)).index, 1);
+      await tap(0.5);
+      assert.equal((await readerState(page)).playing, true);
+      await tap(0.5);
+    }, {settings: {skip: 3}});
+  });
+
+  it('goes to a word clicked in the sentence', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.click('.sr-forward');
+      await page.click('.sr-context-word:text-is("first")');
+      const state = await readerState(page);
+      assert.equal(state.mark, 'first');
+      assert.equal(state.word, 'first');
+      assert.equal(state.playing, false);
     });
   });
 
@@ -460,6 +539,35 @@ describe('settings', () => {
       assert.equal(await page.inputValue('.sr-fontSize'), '48');
       assert.equal(await page.inputValue('.sr-skip'), '10');
     }, {settings: {wpm: 99999, fontSize: 'huge', skip: null}});
+  });
+
+  it('stores a slider value when the slider is released', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.evaluate(() => {
+        const slider = reader('.sr-wpm');
+        slider.value = '700';
+        slider.dispatchEvent(new Event('input', {bubbles: true}));
+      });
+      assert.equal(await page.textContent('.sr-wpm-value'), '700 wpm');
+      assert.equal(await storedSettings(page), undefined);
+      await page.evaluate(() =>
+        reader('.sr-wpm').dispatchEvent(new Event('change', {bubbles: true})));
+      assert.equal((await storedSettings(page)).wpm, 700);
+    });
+  });
+
+  it('follow changes made in another tab', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.evaluate(() => harnessSetRemoteValue('settings',
+          {wpm: 450, fontSize: 64, skip: 4}));
+      assert.equal(await page.textContent('.sr-wpm-value'), '450 wpm');
+      assert.equal(await page.evaluate(() =>
+        reader('.sr-word').style.fontSize), '64px');
+      await page.click('.sr-forward');
+      assert.equal((await readerState(page)).index, 5);
+    });
   });
 
   it('corrects an invalid skip value when the field is left', async () => {
@@ -540,7 +648,10 @@ describe('overlay', () => {
       await openReader(page);
       const inside = () => page.evaluate(() =>
         document.activeElement === document.querySelector('speed-reader'));
-      assert.equal(await page.evaluate(() => document.body.inert), true);
+      // A modal dialog makes the rest of the page inert.
+      assert.equal(await page.evaluate(() => document
+          .querySelector('speed-reader').parentElement.matches('dialog:modal')),
+      true);
       assert.equal(await inside(), true);
       for (let index = 0; index < 12; index++) {
         await page.keyboard.press('Tab');
@@ -548,9 +659,102 @@ describe('overlay', () => {
       }
       await page.keyboard.press('Escape');
       assert.deepEqual(await page.evaluate(() => ({
-        inert: document.body.inert,
+        dialog: !!document.querySelector('dialog'),
         focus: document.activeElement.textContent,
-      })), {inert: false, focus: 'Home'});
+      })), {dialog: false, focus: 'Home'});
+    });
+  });
+
+  it('keeps the page from scrolling while it is open', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await page.evaluate(() =>
+        document.documentElement.style.setProperty('overflow', 'scroll'));
+      await openReader(page);
+      const overflow = () => page.evaluate(() =>
+        getComputedStyle(document.documentElement).overflowY);
+      assert.equal(await overflow(), 'hidden');
+      await page.mouse.move(500, 350);
+      await page.mouse.wheel(0, 400);
+      await delay(200);
+      assert.equal(await page.evaluate(() => scrollY), 0);
+      await page.keyboard.press('Escape');
+      assert.equal(await page.evaluate(() =>
+        document.documentElement.style.overflow), 'scroll');
+    });
+  });
+
+  it('lies above a modal dialog of the page', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await page.evaluate(() => {
+        const dialog = document.createElement('dialog');
+        dialog.id = 'page-dialog';
+        dialog.style.cssText = 'width: 90vw; height: 90vh;';
+        document.body.append(dialog);
+        dialog.showModal();
+      });
+      await openReader(page);
+      await page.click('.sr-forward');
+      assert.equal((await readerState(page)).index, 11);
+      await page.keyboard.press('Escape');
+      assert.equal(await isOpen(page), false);
+      assert.equal(await page.evaluate(() =>
+        document.querySelector('#page-dialog').open), true);
+    });
+  });
+
+  it('cleans up when the page closes its dialog', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.evaluate(() => {
+        for (const dialog of document.querySelectorAll('dialog')) {
+          dialog.close();
+        }
+      });
+      await page.waitForFunction(() => !document.querySelector('speed-reader'));
+      assert.equal(await page.evaluate(() =>
+        document.documentElement.style.overflow), '');
+    });
+  });
+
+  it('remembers the position in the text of a page', async () => {
+    let positions = null;
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.click('.sr-forward');
+      await page.click('.sr-forward');
+      await page.keyboard.press('Escape');
+      positions = await page.evaluate(() => GM_getValue('positions'));
+    });
+    assert.equal(positions.length, 1);
+    assert.equal(positions[0].word, 20);
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      assert.equal((await readerState(page)).index, 21);
+      // The position is forgotten at the end of the text.
+      for (let index = 0; index < 10; index++) {
+        await page.click('.sr-forward');
+      }
+      await page.click('.sr-play');
+      await page.waitForFunction(() =>
+        reader('.sr-play').getAttribute('aria-label') === 'Play');
+      assert.deepEqual(await page.evaluate(() => GM_getValue('positions')),
+          []);
+    }, {positions, settings: {wpm: 1000}});
+  });
+
+  it('does not remember a position in selected text', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await page.evaluate(() => {
+        const range = document.createRange();
+        range.selectNodeContents(document.querySelector('#last'));
+        getSelection().removeAllRanges();
+        getSelection().addRange(range);
+      });
+      await openReader(page);
+      await page.click('.sr-forward');
+      await page.keyboard.press('Escape');
+      assert.equal(await page.evaluate(() => GM_getValue('positions')),
+          undefined);
     });
   });
 

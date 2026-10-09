@@ -8,5 +8,5 @@
     "strict": true,
     "types": []
   },
-  "include": ["scripts/**/*.user.js", "types/**/*.d.ts"]
+  "include": ["lib/**/*.js", "scripts/**/*.user.js", "types/**/*.d.ts"]
 }

@@ -6,32 +6,23 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const {describe, it} = require('node:test');
-const vm = require('node:vm');
 
-/**
- * Runs the userscript with the test hook and returns its pure functions. The
- * script stops before touching the DOM or storage.
- * @return {!Object}
- */
-function loadCore() {
-  const file = path.join(__dirname, '..', 'scripts', 'speed-reader.user.js');
-  let core = null;
-  globalThis.speedReaderTestHook = (api) => {
-    core = api;
-  };
-  try {
-    vm.runInThisContext(fs.readFileSync(file, 'utf8'), {filename: file});
-  } finally {
-    delete globalThis.speedReaderTestHook;
-  }
-  assert.ok(core, 'test hook was not called');
-  return core;
-}
+const {loadScript} = require('./load-script.js');
 
-const core = loadCore();
+const core = loadScript('speed-reader.user.js', 'speedReaderTestHook');
+
+// Invisible and combining characters, written as code points so that they
+// are visible in the source.
+const SOFT_HYPHEN = String.fromCodePoint(0xAD);
+const ZERO_WIDTH_SPACE = String.fromCodePoint(0x200B);
+const WORD_JOINER = String.fromCodePoint(0x2060);
+const BYTE_ORDER_MARK = String.fromCodePoint(0xFEFF);
+const ZERO_WIDTH_JOINER = String.fromCodePoint(0x200D);
+const COMBINING_ACUTE = String.fromCodePoint(0x301);
+const COMBINING_DIAERESIS = String.fromCodePoint(0x308);
+// Woman technologist: woman, zero-width joiner, laptop.
+const TECHNOLOGIST = `👩${ZERO_WIDTH_JOINER}💻`;
 
 /**
  * @param {...string} texts Paragraph texts; a leading "# " marks a heading.
@@ -45,12 +36,19 @@ function paragraphs(...texts) {
 
 describe('cleanText', () => {
   it('removes soft hyphens and zero-width characters', () => {
-    assert.equal(core.cleanText('Schiff­fahrt zero​width ' +
-        '﻿word⁠joiner'), 'Schifffahrt zerowidth wordjoiner');
+    assert.equal(core.cleanText(`Schiff${SOFT_HYPHEN}fahrt ` +
+        `zero${ZERO_WIDTH_SPACE}width ${BYTE_ORDER_MARK}word` +
+        `${WORD_JOINER}joiner`), 'Schifffahrt zerowidth wordjoiner');
   });
 
   it('keeps zero-width joiners of emoji', () => {
-    assert.equal(core.cleanText('👩‍💻 codes'), '👩‍💻 codes');
+    assert.equal(core.cleanText(`${TECHNOLOGIST} codes`),
+        `${TECHNOLOGIST} codes`);
+  });
+
+  it('composes letters with their combining accents', () => {
+    assert.equal(core.cleanText(
+        `Cafe${COMBINING_ACUTE} Mu${COMBINING_DIAERESIS}ller`), 'Café Müller');
   });
 
   it('removes footnote markers', () => {
@@ -64,20 +62,6 @@ describe('cleanText', () => {
 
   it('collapses white space', () => {
     assert.equal(core.cleanText('  a\n\tb  c  '), 'a b c');
-  });
-});
-
-describe('isFootnoteText', () => {
-  it('recognizes markers', () => {
-    for (const text of ['[1]', '12', '[a]', ' [note 3] ', 'b']) {
-      assert.ok(core.isFootnoteText(text), text);
-    }
-  });
-
-  it('rejects words and long numbers', () => {
-    for (const text of ['see', '[sic]', '1234', '[Ed.]', '']) {
-      assert.ok(!core.isFootnoteText(text), text);
-    }
   });
 });
 
@@ -104,6 +88,33 @@ describe('pauseAfter', () => {
 
   it('keeps years at the end of a sentence', () => {
     assert.equal(core.pauseAfter('1990.'), 'sentence');
+  });
+
+  it('does not end a sentence after titles and common abbreviations', () => {
+    for (const word of ['Dr.', 'Prof.', 'bzw.', 'ca.', 'vgl.', 'Nr.', 'Mr.',
+      '(vs.']) {
+      assert.equal(core.pauseAfter(word, 'word', 'Next'), '', word);
+    }
+  });
+
+  it('ends a sentence after "usw." or "etc." before a capital letter', () => {
+    assert.equal(core.pauseAfter('usw.', 'Äpfel', 'Danach'), 'sentence');
+    assert.equal(core.pauseAfter('etc.', 'pears', 'The'), 'sentence');
+    assert.equal(core.pauseAfter('usw.', 'Äpfel', 'gekauft'), '');
+    assert.equal(core.pauseAfter('etc.)', 'pears', 'and'), '');
+  });
+
+  it('tells ordinal numbers from numbers at the end of a sentence', () => {
+    // Ordinal numbers: after an article or "am", before a month, a
+    // lower-case word or a number, and at the start of a paragraph.
+    assert.equal(core.pauseAfter('3.', 'am', 'Mai'), '');
+    assert.equal(core.pauseAfter('2.', 'der', 'Weltkrieg'), '');
+    assert.equal(core.pauseAfter('3.', 'gestern.', 'Mai'), '');
+    assert.equal(core.pauseAfter('3.', 'bis', 'und'), '');
+    assert.equal(core.pauseAfter('1.', '', 'Einleitung'), '');
+    // Counted numbers end the sentence.
+    assert.equal(core.pauseAfter('12.', 'zählte', 'Dann'), 'sentence');
+    assert.equal(core.pauseAfter('12.', 'counted', 'Then'), 'sentence');
   });
 });
 
@@ -155,6 +166,25 @@ describe('splitLongWord', () => {
     const word = '😀'.repeat(maxLength);
     assert.deepEqual(core.splitLongWord(word), [word]);
   });
+
+  it('counts and keeps grapheme clusters whole', () => {
+    const word = TECHNOLOGIST.repeat(maxLength);
+    assert.deepEqual(core.splitLongWord(word), [word]);
+    const pieces = core.splitLongWord(TECHNOLOGIST.repeat(maxLength + 5));
+    assert.equal(pieces.length, 2);
+    for (const piece of pieces) {
+      const clusters = core.graphemes(piece.replace(/-$/, ''));
+      assert.ok(clusters.every((cluster) => cluster === TECHNOLOGIST), piece);
+    }
+  });
+});
+
+describe('graphemes', () => {
+  it('keeps letters with combining marks and emoji sequences together', () => {
+    assert.deepEqual(core.graphemes(`e${COMBINING_ACUTE}a`),
+        [`e${COMBINING_ACUTE}`, 'a']);
+    assert.deepEqual(core.graphemes(`${TECHNOLOGIST}!`), [TECHNOLOGIST, '!']);
+  });
 });
 
 describe('tokenize', () => {
@@ -196,8 +226,20 @@ describe('tokenize', () => {
     assert.deepEqual(text.words.map((word) => word.piece), [0, 1, 3]);
   });
 
+  it('passes the neighbors of a word to the sentence detection', () => {
+    const text = core.tokenize(paragraphs(
+        'Am 3. Mai zählte er bis 12. Dann ging er, z.B. heim.'));
+    assert.deepEqual(text.words.filter((word) => word.pause)
+        .map((word) => [word.text, word.pause]), [
+      ['12.', 'sentence'],
+      ['er,', 'clause'],
+      ['heim.', 'paragraph'],
+    ]);
+  });
+
   it('skips empty paragraphs and cleans text', () => {
-    const text = core.tokenize(paragraphs('  ', 'Schiff­fahrt[1]'));
+    const text = core.tokenize(
+        paragraphs('  ', `Schiff${SOFT_HYPHEN}fahrt[1]`));
     assert.deepEqual(text.words.map((word) => word.text), ['Schifffahrt']);
   });
 
@@ -229,6 +271,12 @@ describe('pivotIndex', () => {
   it('counts code points', () => {
     assert.equal(core.pivotIndex('𝐀bc'), 1);
     assert.equal(core.pivotIndex('😀ab'), 2);
+  });
+
+  it('counts grapheme clusters', () => {
+    // A letter with a combining accent is one character.
+    assert.equal(core.pivotIndex(`e${COMBINING_ACUTE}tude`), 1);
+    assert.equal(core.pivotIndex(`${TECHNOLOGIST}ab`), 2);
   });
 
   it('returns 0 without letters', () => {
@@ -306,6 +354,113 @@ describe('jumpTarget', () => {
 
   it('handles an empty text', () => {
     assert.equal(core.jumpTarget(core.tokenize([]), 0, 5), 0);
+  });
+});
+
+describe('resumeTarget', () => {
+  const text = core.tokenize(paragraphs(
+      'One two. Three Donaudampfschifffahrtsgesellschaft five six seven ' +
+      'eight nine ten.'));
+  const {maxResumeRewind} = core.config;
+  // Pieces: One 0, two. 1, Three 2, Donau… 3 and 4, five 5, six 6, seven 7,
+  // eight 8, nine 9, ten. 10.
+
+  it('goes back to the start of the sentence', () => {
+    assert.equal(core.resumeTarget(text, 5, maxResumeRewind), 2);
+    assert.equal(core.resumeTarget(text, 1, maxResumeRewind), 0);
+  });
+
+  it('goes back at most the given number of words', () => {
+    // From "ten." (word 9) five words back is "five" (word 4, piece 5).
+    assert.equal(core.resumeTarget(text, 10, 5), 5);
+    assert.equal(core.resumeTarget(text, 10, 0), 10);
+  });
+
+  it('starts a split word at its first piece', () => {
+    assert.equal(core.resumeTarget(text, 4, 0), 3);
+  });
+
+  it('handles an empty text', () => {
+    assert.equal(core.resumeTarget(core.tokenize([]), 3, 5), 0);
+  });
+});
+
+describe('rampFactor', () => {
+  const {pieces, start} = core.config.rampUp;
+
+  it('starts slower and reaches the normal speed', () => {
+    assert.equal(core.rampFactor(0), start);
+    for (let step = 1; step < pieces; step++) {
+      assert.ok(core.rampFactor(step) < core.rampFactor(step - 1));
+      assert.ok(core.rampFactor(step) > 1);
+    }
+    assert.equal(core.rampFactor(pieces), 1);
+    assert.equal(core.rampFactor(1000), 1);
+  });
+});
+
+describe('stageAction', () => {
+  const {touchZone} = core.config;
+
+  it('toggles playback on a click anywhere', () => {
+    for (const share of [0, 0.5, 1]) {
+      assert.equal(core.stageAction(share, 'mouse'), 'toggle');
+      assert.equal(core.stageAction(share, ''), 'toggle');
+    }
+  });
+
+  it('skips on a tap near the edges', () => {
+    assert.equal(core.stageAction(touchZone / 2, 'touch'), 'back');
+    assert.equal(core.stageAction(0.5, 'touch'), 'toggle');
+    assert.equal(core.stageAction(1 - touchZone / 2, 'touch'), 'forward');
+  });
+});
+
+describe('remembered positions', () => {
+  it('hashes texts', () => {
+    assert.equal(core.hashText('abc'), core.hashText('abc'));
+    assert.notEqual(core.hashText('abc'), core.hashText('abd'));
+    assert.match(core.hashText(''), /^[0-9a-z]+$/);
+  });
+
+  it('ignores the hash of a URL', () => {
+    assert.equal(core.withoutHash('https://a.example/x?y=1#part'),
+        'https://a.example/x?y=1');
+    assert.equal(core.withoutHash('https://a.example/'), 'https://a.example/');
+  });
+
+  it('keeps valid stored positions only', () => {
+    assert.deepEqual(core.sanitizePositions(null), []);
+    assert.deepEqual(core.sanitizePositions([
+      {url: 'a', hash: 'h', word: 3, extra: true},
+      {url: 'b', hash: 'h', word: 0},
+      {url: 'c', hash: 'h', word: 1.5},
+      {url: 7, hash: 'h', word: 2},
+      'd',
+    ]), [{url: 'a', hash: 'h', word: 3}]);
+  });
+
+  it('puts the newest position first and limits their number', () => {
+    const {maxPositions} = core.config;
+    let positions = [];
+    for (let index = 0; index < maxPositions + 5; index++) {
+      positions = core.withPosition(positions,
+          {url: `u${index}`, hash: 'h', word: 1});
+    }
+    assert.equal(positions.length, maxPositions);
+    assert.equal(positions[0].url, `u${maxPositions + 4}`);
+    positions = core.withPosition(positions, {url: 'u10', hash: 'h', word: 9});
+    assert.deepEqual(positions[0], {url: 'u10', hash: 'h', word: 9});
+    assert.equal(positions.filter((entry) => entry.url === 'u10').length, 1);
+    assert.equal(core.withoutPosition(positions, 'u10').length,
+        maxPositions - 1);
+  });
+
+  it('restores a position only for the same text', () => {
+    const positions = [{url: 'a', hash: 'h1', word: 12}];
+    assert.equal(core.rememberedWord(positions, 'a', 'h1'), 12);
+    assert.equal(core.rememberedWord(positions, 'a', 'h2'), 0);
+    assert.equal(core.rememberedWord(positions, 'b', 'h1'), 0);
   });
 });
 
@@ -395,43 +550,5 @@ describe('fitWord', () => {
   it('keeps empty words in place', () => {
     assert.deepEqual(core.fitWord({before: 0, pivot: 0, after: 0}, 500),
         {scale: 1, left: 500 * pivotShare});
-  });
-});
-
-describe('content scoring (from the Reading Ruler)', () => {
-  it('excludes navigation and ads by name, but keeps content wrappers', () => {
-    assert.ok(core.isExcludedName('site-sidebar'));
-    assert.ok(core.isExcludedName(' ad-slot ads'));
-    assert.ok(!core.isExcludedName('content-with-sidebar'));
-    assert.ok(!core.isExcludedName('header'));
-  });
-
-  it('weights class names', () => {
-    assert.equal(core.classWeight('article-body'), 25);
-    assert.equal(core.classWeight('comments'), -25);
-  });
-
-  it('does not count code blocks as paragraphs', () => {
-    assert.ok(!core.countsAsParagraph('pre', false));
-    assert.ok(core.countsAsParagraph('p', false));
-    assert.ok(core.countsAsParagraph('div', true));
-  });
-
-  it('scores paragraphs and picks the best container', () => {
-    assert.equal(core.paragraphScore({textLength: 10, commaCount: 3}), 0);
-    assert.equal(core.paragraphScore({textLength: 250, commaCount: 2}), 5);
-    assert.ok(core.scoreContainer({tagName: 'article', name: '',
-      paragraphs: [{textLength: 300, commaCount: 3, depth: 0}],
-      linkDensity: 0}) > 0);
-    assert.equal(core.pickBestCandidate(
-        [{score: 10, parent: -1}, {score: 30, parent: 0}]), 1);
-    assert.ok(core.hasEnoughText([{textLength: 600}]));
-  });
-
-  it('picks a nested article that holds most text', () => {
-    assert.equal(core.chooseSemanticRoot([
-      {textLength: 1000, parent: -1},
-      {textLength: 900, parent: 0},
-    ]), 1);
   });
 });

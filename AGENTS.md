@@ -5,6 +5,7 @@ Guidance for AI coding agents working in this repository.
 ## Project
 
 A collection of personal userscripts, located in `scripts/` as `*.user.js` files.
+Code shared by several scripts lives in `lib/` (see "Shared libraries").
 
 ## Runtime environment
 
@@ -16,6 +17,21 @@ A collection of personal userscripts, located in `scripts/` as `*.user.js` files
 - Keep the metadata block (`// ==UserScript==`) complete and bump `@version`
   whenever a script changes, so Violentmonkey picks up the update via
   `@updateURL` / `@downloadURL`.
+
+## Shared libraries
+
+- A library in `lib/` defines one global (e.g. `ContentDetection` in
+  `lib/content-detection.js`) and does nothing else. Scripts load it with
+  `@require https://raw.githubusercontent.com/JulWit/userscripts/main/lib/<file>?v=<version>`;
+  Violentmonkey runs it in the script's scope before the script.
+- The `?v=` query makes Violentmonkey download a changed library: it keeps
+  required files cached by URL. When a library changes, bump the
+  `@version` in its file overview, the `?v=` of every script that requires
+  it, and those scripts' `@version`. `tests/content-detection.test.js`
+  checks that the versions match.
+- The unit tests load a script together with its required files
+  (`tests/load-script.js`), and the fixture pages load them with a
+  `<script>` tag before the script.
 
 ## Tests and type checking
 

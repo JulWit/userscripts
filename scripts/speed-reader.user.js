@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.1.0
+// @version      1.2.0
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -9,11 +9,13 @@
 // @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiMyYjJmMzYiLz48ZyBmaWxsPSIjOWFhM2FkIj48cmVjdCB4PSI4IiB5PSIxNyIgd2lkdGg9IjQ4IiBoZWlnaHQ9IjIiIHJ4PSIxIiBvcGFjaXR5PSIuNiIvPjxyZWN0IHg9IjgiIHk9IjQ1IiB3aWR0aD0iNDgiIGhlaWdodD0iMiIgcng9IjEiIG9wYWNpdHk9Ii42Ii8+PHJlY3QgeD0iMjYiIHk9IjExIiB3aWR0aD0iMyIgaGVpZ2h0PSI4IiByeD0iMS41Ii8+PHJlY3QgeD0iMjYiIHk9IjQ1IiB3aWR0aD0iMyIgaGVpZ2h0PSI4IiByeD0iMS41Ii8+PHJlY3QgeD0iMTAiIHk9IjI3IiB3aWR0aD0iMTIiIGhlaWdodD0iMTAiIHJ4PSIzIi8+PHJlY3QgeD0iMzMiIHk9IjI3IiB3aWR0aD0iMjEiIGhlaWdodD0iMTAiIHJ4PSIzIi8+PC9nPjxyZWN0IHg9IjIzLjUiIHk9IjI1IiB3aWR0aD0iOCIgaGVpZ2h0PSIxNCIgcng9IjMiIGZpbGw9IiNmZjVhNDUiLz48L3N2Zz4K
 // @updateURL    https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/speed-reader.user.js
 // @downloadURL  https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/speed-reader.user.js
+// @require      https://raw.githubusercontent.com/JulWit/userscripts/main/lib/content-detection.js?v=1.0.0
 // @match        *://*/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
-// @run-at       document-idle
+// @grant        GM_addValueChangeListener
+// @run-at       document-start
 // @noframes
 // ==/UserScript==
 // @ts-check
@@ -24,11 +26,18 @@
  * place in an overlay on the page, so the eyes do not have to move. Each word
  * is aligned at its fixation letter (optimal recognition point), which is
  * highlighted and stays at the same horizontal position. Words are shown
- * longer after punctuation, at the end of paragraphs and after headings.
- * The script registers a menu command and does nothing else until it is
- * used. The reader is an overlay in a shadow root on the page rather than a
- * window of its own, which pop-up blockers would stop: script manager menu
- * commands do not count as user actions in the page.
+ * longer after punctuation, at the end of paragraphs and after headings;
+ * playback starts a little slower and, after a pause, resumes a few words
+ * back. The position in a page's text is remembered for the next visit.
+ * The script registers a menu command and a key listener and does nothing
+ * else until it is used. The reader is a modal dialog in the top layer with
+ * its interface in a closed shadow root, rather than a window of its own,
+ * which pop-up blockers would stop: script manager menu commands do not count
+ * as user actions in the page. The script runs at document-start, so that
+ * its key listener comes before the page's own and keeps keys from the page
+ * while the reader is open.
+ * The content detection is shared with the Reading Ruler
+ * (lib/content-detection.js, loaded with @require).
  * Known limitations: text in iframes and in shadow DOM (web components) is
  * not read.
  * Code style: Google JavaScript Style Guide, Google HTML/CSS Style Guide.
@@ -47,10 +56,14 @@
    */
 
   /**
-   * A word of the text. pause is the kind of pause after it ('' for none,
-   * 'clause', 'sentence', 'paragraph' or 'heading'), sentence the index of
-   * its sentence and piece the index of its first piece.
-   * @typedef {{text: string, pause: string, sentence: number,
+   * The kind of pause after a word ('' for none).
+   * @typedef {(''|'clause'|'sentence'|'paragraph'|'heading')} Pause
+   */
+
+  /**
+   * A word of the text. pause is the kind of pause after it, sentence the
+   * index of its sentence and piece the index of its first piece.
+   * @typedef {{text: string, pause: !Pause, sentence: number,
    *     piece: number}} Word
    */
 
@@ -75,6 +88,8 @@
    * @typedef {{wpm: number, fontSize: number, skip: number}} Settings
    */
 
+  /** @typedef {('wpm'|'fontSize'|'skip')} SettingName */
+
   /** @typedef {{min: number, max: number, step: number,
    *     fallback: number}} Range */
 
@@ -85,28 +100,25 @@
    */
 
   /**
-   * Paragraph below a candidate container; depth 0 is a direct child.
-   * @typedef {{textLength: number, commaCount: number,
-   *     depth: number}} ParagraphFeatures
+   * What a key press does in the reader ('' for nothing).
+   * @typedef {(''|'toggle'|'back'|'forward'|'faster'|'slower'|
+   *     'close')} KeyAction
    */
 
   /**
-   * Input of the Readability-like container score. name holds the element's
-   * ID and classes.
-   * @typedef {{tagName: string, name: string,
-   *     paragraphs: !Array<!ParagraphFeatures>,
-   *     linkDensity: number}} ContainerFeatures
+   * Kind of the focused element in the reader, for keyAction.
+   * @typedef {('button'|'range'|'text'|'other')} TargetKind
    */
 
   /**
-   * Scored container; parent is the index of the nearest candidate ancestor
-   * or -1.
-   * @typedef {{score: number, parent: number}} ScoredCandidate
+   * What a click or tap on the word does.
+   * @typedef {('back'|'toggle'|'forward')} StageAction
    */
 
   /**
-   * Semantic container (article, main); textLength counts paragraph text.
-   * @typedef {{textLength: number, parent: number}} SemanticCandidate
+   * Remembered reading position in the text of a page: url without its
+   * hash, hash of the text (hashText) and the index of the word.
+   * @typedef {{url: string, hash: string, word: number}} Position
    */
 
   // ===========================================================================
@@ -146,6 +158,12 @@
       longWord: 1.2,
       longWordLength: 12,
     },
+    // Playback starts slower: the first piece is shown start times as long,
+    // and the factor falls evenly to 1 over the first pieces.
+    rampUp: {pieces: 4, start: 2},
+    // After a pause, playback resumes at the start of the sentence, but at
+    // most this many words back.
+    maxResumeRewind: 5,
     // Words with more characters are split, at hyphens and slashes first,
     // then into pieces of equal length with a hyphen. A cut may move up to
     // cutWindow characters to fall between a vowel and a consonant.
@@ -154,12 +172,34 @@
     // up to length 5, the third up to 9, the fourth up to 13, the fifth
     // beyond.
     pivotSteps: [1, 5, 9, 13],
+    // Abbreviations (lower case, without the period). After a "never" one a
+    // period ends no sentence; after an "ambiguous" one only if the next
+    // word starts with a capital letter.
+    abbreviations: {
+      never: ['abb', 'approx', 'bd', 'bzw', 'ca', 'cf', 'dr', 'evtl', 'fig',
+        'fr', 'ggf', 'hr', 'hrn', 'hrsg', 'inkl', 'jr', 'kap', 'mr', 'mrs',
+        'ms', 'nr', 'pp', 'prof', 'sog', 'sr', 'st', 'vgl', 'vol', 'vs',
+        'zzgl'],
+      ambiguous: ['etc', 'usf', 'usw'],
+    },
+    // Words after which a number with a period is an ordinal number ("am 3.
+    // Mai", "der 2. Platz"), and months that follow one ("3. Mai").
+    ordinalWords: ['am', 'beim', 'das', 'dem', 'den', 'der', 'des', 'die',
+      'ihr', 'ihre', 'ihrem', 'ihren', 'im', 'jedem', 'jeden', 'jeder',
+      'jedes', 'sein', 'seine', 'seinem', 'seinen', 'vom', 'zum', 'zur'],
+    monthNames: ['januar', 'jänner', 'februar', 'märz', 'april', 'mai',
+      'juni', 'juli', 'august', 'september', 'oktober', 'november',
+      'dezember', 'january', 'february', 'march', 'may', 'june', 'july',
+      'october', 'december'],
     // Horizontal position of the fixation letter as a share of the stage
     // width, and the space kept free at the stage edges in px.
     pivotShare: 0.35,
     stagePadding: 12,
     // Words are never shrunk below this share of the font size.
     minScale: 0.2,
+    // A tap (not a click) on this share of the stage at its left or right
+    // edge skips back or forward instead of toggling playback.
+    touchZone: 0.25,
     // A timer that fires later than this (in ms, e.g. while the window was
     // throttled) restarts the schedule instead of catching up.
     maxLag: 1000,
@@ -170,84 +210,30 @@
     panel: {maxWidth: 760, minHeight: 540},
     fullScreenWidth: 600,
     storageSettings: 'settings',
-
-    // Content detection, as in the Reading Ruler.
-    // Elements that hold paragraphs of text.
-    blockTags: ['p', 'li', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-      'dt', 'dd'],
-    headingTags: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
-    // Elements that may hold body text without paragraphs. For the content
-    // detection they count as paragraphs only if they break their text with
-    // <br>: table cells and divs of web apps hold text too, but not prose.
-    // If they also contain blocks, each run of their own text between those
-    // blocks counts as a paragraph.
-    textContainerTags: ['div', 'section', 'td', 'figcaption'],
-    // Text outside every block tag belongs to its nearest ancestor with one
-    // of these computed display values.
-    blockDisplays: ['block', 'flow-root', 'list-item', 'table-cell',
-      'table-caption'],
-    // Subtrees without body text. A header is only skipped outside an
-    // article: inside, it holds the article's title. Code blocks (pre) are
-    // not read either.
-    excludedTags: ['nav', 'aside', 'footer', 'button', 'select', 'textarea',
-      'input', 'label', 'option', 'script', 'style', 'noscript', 'template',
-      'svg', 'math', 'canvas', 'video', 'audio', 'iframe', 'object', 'embed',
-      'pre'],
-    excludedRoles: ['navigation', 'complementary', 'banner', 'contentinfo',
-      'menu', 'menubar', 'search'],
-    // Words in class names or IDs of non-content elements. A word matches if
-    // it starts or ends with one of them ("navbar", "subnav", "comments").
-    negativeNames: ['sidebar', 'menu', 'nav', 'comment', 'footer', 'promo',
-      'related', 'share'],
-    // Advertisement words, only as whole words: "ad" is part of "header".
-    adNames: ['ad', 'ads', 'adbox', 'adslot', 'adunit', 'adsense', 'advert',
-      'adverts', 'advertisement', 'advertising', 'sponsor', 'sponsored'],
-    // Words that keep an element despite a negative word, e.g. the wrapper
-    // "content-with-sidebar". Not "main": "main-menu" is a menu.
-    keepNames: ['article', 'body', 'content'],
-    // Words that raise a container's score (Readability).
-    positiveNames: ['article', 'blog', 'body', 'content', 'entry', 'main',
-      'page', 'post', 'story', 'text'],
-    // Blocks with a larger share of link text are skipped (except headings).
-    maxLinkDensity: 0.5,
-    // Readability-like scoring of content containers: paragraphs shorter than
-    // minParagraphLength are ignored, scores are passed up maxDepth levels.
-    // The parent of the best container wins if it scores at least
-    // parentRatio of the best score, or if a sibling scores siblingRatio.
-    // The winner needs minText characters of paragraph text.
-    scoring: {
-      minParagraphLength: 25,
-      maxDepth: 5,
-      parentRatio: 0.75,
-      siblingRatio: 0.2,
-      minText: 500,
-    },
-    // An article or main element needs this much paragraph text. A nested
-    // one is preferred if it holds semanticDominance of the outer's text.
-    minSemanticText: 250,
-    semanticDominance: 0.7,
-    // Fixed or sticky elements narrower or lower than this share of the
-    // viewport are widgets (headers, sidebars); larger ones are layout shells
-    // that contain the whole page.
-    widgetShare: 0.6,
+    // Reading positions of the most recently read pages, newest first.
+    storagePositions: 'positions',
+    maxPositions: 50,
   });
 
   // ===========================================================================
   // Pure functions: text, timing, settings (no DOM, no storage)
   // ===========================================================================
 
-  // Soft hyphens and zero-width characters that sites insert for line
-  // breaking. Zero-width joiners stay: they form emoji and ligatures.
-  const INVISIBLE_PATTERN = /[­​⁠﻿]/g;
+  // Soft hyphens and zero-width characters (U+00AD, U+200B, U+2060, U+FEFF)
+  // that sites insert for line breaking. Zero-width joiners stay: they form
+  // emoji and ligatures.
+  const INVISIBLE_PATTERN = /[\u00AD\u200B\u2060\uFEFF]/g;
   // Footnote markers such as [1], [2–4], [a] or [note 3].
-  const FOOTNOTE_MARKER = String.raw`\d{1,3}(?:\s*[,–-]\s*\d{1,3})*|[a-z]|` +
-      String.raw`(?:note|nb|fn)\.?\s*\d{1,3}`;
-  const FOOTNOTE_PATTERN =
-      new RegExp(String.raw`\s*\[(?:${FOOTNOTE_MARKER})\]`, 'gi');
-  const FOOTNOTE_TEXT_PATTERN =
-      new RegExp(String.raw`^\[?(?:${FOOTNOTE_MARKER})\]?$`, 'i');
+  const FOOTNOTE_PATTERN = new RegExp(
+      String.raw`\s*\[(?:${ContentDetection.footnoteMarker})\]`, 'gi');
   const LETTER_PATTERN = /[\p{L}\p{N}]/u;
   const VOWEL_PATTERN = /[aeiouyäöüàáâèéêëìíîïòóôùúûæøå]/iu;
+  // Quotes and brackets around a word.
+  const OPENING_PATTERN = /^["'“”‘’„»«›‹(\[{]+/u;
+  const CLOSING_PATTERN = /["'“”‘’»«›‹)\]}]+$/u;
+  const GRAPHEME_SEGMENTER = typeof Intl.Segmenter === 'function' ?
+      new Intl.Segmenter(undefined, {granularity: 'grapheme'}) :
+      null;
 
   /**
    * @param {number} value
@@ -260,6 +246,19 @@
   }
 
   /**
+   * Splits a text into the characters a reader sees (grapheme clusters): a
+   * letter with its combining marks, a flag or an emoji sequence stays
+   * whole.
+   * @param {string} text
+   * @return {!Array<string>}
+   */
+  function graphemes(text) {
+    return GRAPHEME_SEGMENTER ?
+        Array.from(GRAPHEME_SEGMENTER.segment(text), (part) => part.segment) :
+        Array.from(text);
+  }
+
+  /**
    * Removes footnote markers such as "[1]" from a text.
    * @param {string} text
    * @return {string}
@@ -269,22 +268,15 @@
   }
 
   /**
-   * Whether the text of an element is a footnote marker ("[1]", "2", "a").
-   * @param {string} text
-   * @return {boolean}
-   */
-  function isFootnoteText(text) {
-    return FOOTNOTE_TEXT_PATTERN.test(text.trim());
-  }
-
-  /**
-   * Prepares the text of a paragraph for reading: removes soft hyphens,
-   * zero-width characters and footnote markers and collapses white space.
+   * Prepares the text of a paragraph for reading: composes letters with
+   * their accents (NFC), removes soft hyphens, zero-width characters and
+   * footnote markers and collapses white space.
    * @param {string} text
    * @return {string}
    */
   function cleanText(text) {
-    return stripFootnoteMarkers(text.replace(INVISIBLE_PATTERN, ''))
+    return stripFootnoteMarkers(
+        text.normalize('NFC').replace(INVISIBLE_PATTERN, ''))
         .replace(/\s+/g, ' ').trim();
   }
 
@@ -301,18 +293,59 @@
   }
 
   /**
-   * The pause after a word inside a paragraph, from its punctuation.
-   * Closing quotes and brackets are ignored. Abbreviations such as "z.B."
-   * and ordinal numbers such as "3." do not end a sentence.
    * @param {string} word
-   * @return {string} '', 'clause' or 'sentence'.
+   * @return {string} The word without surrounding quotes, brackets and
+   *     trailing punctuation, in lower case.
    */
-  function pauseAfter(word) {
-    const text = word.replace(/["'“”‘’»«›‹)\]}]+$/u, '');
-    if (/[.!?…]$/.test(text)) {
-      return /^(?:\p{L}\.){2,}$/u.test(text) || /^\d{1,2}\.$/.test(text) ?
-          '' :
-          'sentence';
+  function bareWord(word) {
+    return word.replace(OPENING_PATTERN, '').replace(CLOSING_PATTERN, '')
+        .replace(/[.,;:!?…]+$/u, '').toLowerCase();
+  }
+
+  /**
+   * Whether a period ends a sentence. It does not after an abbreviation
+   * ("z.B.", "Dr.", "bzw."), and after "usw." or "etc." only before a
+   * capital letter. A number of one or two digits is an ordinal number ("am
+   * 3. Mai") and ends no sentence at the start of a paragraph (a numbered
+   * heading or list item), after an article or a contraction such as "am",
+   * or before a lower-case word, a number or a month.
+   * @param {string} text The word without closing quotes and brackets.
+   * @param {string} previous The word before, '' at the paragraph start.
+   * @param {string} next The word after, '' at the paragraph end.
+   * @return {boolean}
+   */
+  function endsSentenceAtPeriod(text, previous, next) {
+    if (/^(?:\p{L}\.){2,}$/u.test(text)) return false;
+    const stem = text.replace(OPENING_PATTERN, '').slice(0, -1).toLowerCase();
+    const following = next.replace(OPENING_PATTERN, '');
+    const capitalized = /^\p{Lu}/u.test(following);
+    const {never, ambiguous} = CONFIG.abbreviations;
+    if (never.includes(stem)) return false;
+    if (ambiguous.includes(stem)) return !following || capitalized;
+    if (/^\d{1,2}$/.test(stem)) {
+      const ordinal = !previous ||
+          CONFIG.ordinalWords.includes(bareWord(previous)) ||
+          /^[\p{Ll}\d]/u.test(following) ||
+          CONFIG.monthNames.includes(bareWord(following));
+      return !ordinal;
+    }
+    return true;
+  }
+
+  /**
+   * The pause after a word inside a paragraph, from its punctuation (see
+   * endsSentenceAtPeriod for periods). Closing quotes and brackets are
+   * ignored.
+   * @param {string} word
+   * @param {string=} previous The word before, '' at the paragraph start.
+   * @param {string=} next The word after, '' at the paragraph end.
+   * @return {!Pause} '', 'clause' or 'sentence'.
+   */
+  function pauseAfter(word, previous = '', next = '') {
+    const text = word.replace(CLOSING_PATTERN, '');
+    if (/[!?…]$/.test(text)) return 'sentence';
+    if (text.endsWith('.')) {
+      return endsSentenceAtPeriod(text, previous, next) ? 'sentence' : '';
     }
     return /(?:[,;:]|\s[-–—]|[–—])$/.test(text) ? 'clause' : '';
   }
@@ -322,7 +355,7 @@
    * about equal length, each but the last ending with a hyphen. Cuts move
    * by up to CONFIG.split.cutWindow characters to fall between a vowel and
    * a consonant, which often matches a syllable boundary.
-   * @param {!Array<string>} chars
+   * @param {!Array<string>} chars Grapheme clusters.
    * @return {!Array<string>}
    */
   function cutIntoChunks(chars) {
@@ -357,15 +390,15 @@
 
   /**
    * Splits a word that is too long to be read at a glance (compounds, URLs)
-   * into pieces of at most CONFIG.split.maxLength characters: at hyphens,
-   * dashes, slashes and underscores, which stay at the end of a piece, and
-   * where there are none, into chunks with a hyphen.
+   * into pieces of at most CONFIG.split.maxLength characters (grapheme
+   * clusters): at hyphens, dashes, slashes and underscores, which stay at
+   * the end of a piece, and where there are none, into chunks with a hyphen.
    * @param {string} word
    * @return {!Array<string>} The word itself if it is short enough.
    */
   function splitLongWord(word) {
     const {maxLength} = CONFIG.split;
-    if (Array.from(word).length <= maxLength) return [word];
+    if (graphemes(word).length <= maxLength) return [word];
     const segments = word.match(/[^-–/_]*(?:[-–/_]+|$)/gu) || [word];
     /** @type {!Array<string>} */
     const merged = [];
@@ -373,14 +406,14 @@
       if (!segment) continue;
       const last = merged.length - 1;
       if (last >= 0 &&
-          Array.from(merged[last] + segment).length <= maxLength) {
+          graphemes(merged[last] + segment).length <= maxLength) {
         merged[last] += segment;
       } else {
         merged.push(segment);
       }
     }
     return merged.flatMap((part) => {
-      const chars = Array.from(part);
+      const chars = graphemes(part);
       return chars.length > maxLength ? cutIntoChunks(chars) : [part];
     });
   }
@@ -414,7 +447,9 @@
         }
       }
       texts.forEach((text, index) => {
-        let pause = pauseAfter(text);
+        /** @type {!Pause} */
+        let pause = pauseAfter(text, texts[index - 1] || '',
+            texts[index + 1] || '');
         if (index === texts.length - 1) {
           pause = paragraph.heading ? 'heading' : 'paragraph';
         }
@@ -437,14 +472,14 @@
   }
 
   /**
-   * Index of the fixation letter of a word (in code points): see
-   * CONFIG.pivotSteps. Leading and trailing punctuation does not count
-   * towards the length, and the letter is never a leading quote.
+   * Index of the fixation letter of a word, in grapheme clusters (see
+   * graphemes): see CONFIG.pivotSteps. Leading and trailing punctuation does
+   * not count towards the length, and the letter is never a leading quote.
    * @param {string} text
    * @return {number}
    */
   function pivotIndex(text) {
-    const chars = Array.from(text);
+    const chars = graphemes(text);
     let start = 0;
     while (start < chars.length && !LETTER_PATTERN.test(chars[start])) {
       start++;
@@ -471,11 +506,22 @@
       const next = text.pieces[index + 1];
       if (!next || next.word !== piece.word) {
         const pause = text.words[piece.word].pause;
-        const factors = /** @type {!Object<string, number>} */ (delay);
-        if (pause) factor *= factors[pause];
+        if (pause) factor *= delay[pause];
       }
       return factor;
     });
+  }
+
+  /**
+   * Factor of the display time at the start of playback (CONFIG.rampUp).
+   * @param {number} step Pieces shown since playback started; 0 for the
+   *     first.
+   * @return {number}
+   */
+  function rampFactor(step) {
+    const {pieces, start} = CONFIG.rampUp;
+    if (step >= pieces) return 1;
+    return 1 + (start - 1) * (pieces - Math.max(0, step)) / pieces;
   }
 
   /**
@@ -535,15 +581,45 @@
   }
 
   /**
+   * The piece to resume at after a pause, so that the reader finds the
+   * thread again: the first piece of the current sentence, but at most
+   * maxRewind words back.
+   * @param {!ReaderText} text
+   * @param {number} index Current piece.
+   * @param {number} maxRewind
+   * @return {number} Piece index, 0 for an empty text.
+   */
+  function resumeTarget(text, index, maxRewind) {
+    if (!text.words.length) return 0;
+    const word = text.pieces[clamp(index, 0, text.pieces.length - 1)].word;
+    const sentence = text.sentences[text.words[word].sentence];
+    const start = sentence ? sentence.start : word;
+    return text.words[Math.max(start, word - maxRewind)].piece;
+  }
+
+  /**
+   * What a click or tap on the word does: a tap near the left or right edge
+   * of the stage skips, anything else toggles playback.
+   * @param {number} share Horizontal position as a share of the stage width.
+   * @param {string} pointerType PointerEvent.pointerType of the press.
+   * @return {!StageAction}
+   */
+  function stageAction(share, pointerType) {
+    if (pointerType !== 'touch') return 'toggle';
+    if (share < CONFIG.touchZone) return 'back';
+    if (share > 1 - CONFIG.touchZone) return 'forward';
+    return 'toggle';
+  }
+
+  /**
    * Validates a setting: numbers are clamped to the range and rounded to its
    * step, anything else becomes the default.
-   * @param {string} name Key of CONFIG.settings.
+   * @param {!SettingName} name
    * @param {*} value
    * @return {number}
    */
   function sanitizeSetting(name, value) {
-    const range = /** @type {!Object<string, !Range>} */ (
-      CONFIG.settings)[name];
+    const range = CONFIG.settings[name];
     const number = typeof value === 'string' && value.trim() ?
         Number(value) :
         value;
@@ -569,30 +645,30 @@
     };
   }
 
+  /** @type {!Readonly<!Record<string, !KeyAction>>} */
+  const KEY_ACTIONS = Object.freeze({
+    ' ': 'toggle',
+    'ArrowLeft': 'back',
+    'ArrowRight': 'forward',
+    'ArrowUp': 'faster',
+    'ArrowDown': 'slower',
+  });
+
   /**
    * The reader action of a key press. Escape closes the reader. Other keys
    * that the focused control uses itself keep their normal behavior: Space
    * and Enter press a button, the arrow keys move a slider, and text fields
    * take every key.
    * @param {string} key KeyboardEvent.key.
-   * @param {string} target Kind of the focused element: 'button', 'range',
-   *     'text' or 'other'.
+   * @param {!TargetKind} target Kind of the focused element.
    * @param {boolean} modified Whether Ctrl, Alt or Meta is held.
-   * @return {string} 'toggle', 'back', 'forward', 'faster', 'slower',
-   *     'close' or ''.
+   * @return {!KeyAction}
    */
   function keyAction(key, target, modified) {
     if (modified) return '';
     if (key === 'Escape') return 'close';
     if (target === 'text') return '';
-    const actions = /** @type {!Object<string, string>} */ ({
-      ' ': 'toggle',
-      'ArrowLeft': 'back',
-      'ArrowRight': 'forward',
-      'ArrowUp': 'faster',
-      'ArrowDown': 'slower',
-    });
-    const action = actions[key] || '';
+    const action = KEY_ACTIONS[key] || '';
     if (target === 'button' && action === 'toggle') return '';
     if (target === 'range' && action && action !== 'toggle') return '';
     return action;
@@ -624,264 +700,86 @@
   }
 
   // ===========================================================================
-  // Pure functions: content scoring (from the Reading Ruler)
+  // Pure functions: remembered positions
   // ===========================================================================
 
   /**
-   * Splits the ID and class names of an element into lower-case words: the
-   * parts between punctuation ("article-body" → "article", "body"), and their
-   * camel-case parts ("sideBar" → "sidebar", "side", "bar").
-   * @param {string} name
-   * @return {!Array<string>}
-   */
-  function nameTokens(name) {
-    const tokens = new Set();
-    for (const chunk of name.split(/[^A-Za-z0-9]+/)) {
-      if (!chunk) continue;
-      tokens.add(chunk.toLowerCase());
-      for (const part of chunk.split(/(?<=[a-z0-9])(?=[A-Z])/)) {
-        tokens.add(part.toLowerCase());
-      }
-    }
-    return [...tokens];
-  }
-
-  /**
-   * @param {!Array<string>} tokens
-   * @param {!ReadonlyArray<string>} words
-   * @return {boolean} Whether a token starts or ends with one of the words.
-   */
-  function hasAffix(tokens, words) {
-    return tokens.some((token) => words.some((word) => token.startsWith(word) ||
-        token.endsWith(word) || token.endsWith(`${word}s`)));
-  }
-
-  /**
-   * @param {!Array<string>} tokens
-   * @return {boolean} Whether the words suggest a non-content element.
-   */
-  function hasNegativeName(tokens) {
-    return hasAffix(tokens, CONFIG.negativeNames) ||
-        tokens.some((token) => CONFIG.adNames.includes(token));
-  }
-
-  /**
-   * Whether an element's ID and classes mark it as a sidebar, menu, comment
-   * section, ad etc.
-   * @param {string} name ID and class names.
-   * @return {boolean}
-   */
-  function isExcludedName(name) {
-    const tokens = nameTokens(name);
-    return hasNegativeName(tokens) && !tokens.some((token) =>
-      CONFIG.keepNames.some((word) => token.startsWith(word)));
-  }
-
-  /**
-   * Score bonus or penalty from ID and class names (Readability: ±25).
-   * @param {string} name
-   * @return {number}
-   */
-  function classWeight(name) {
-    const tokens = nameTokens(name);
-    let weight = 0;
-    if (tokens.some((token) =>
-      CONFIG.positiveNames.some((word) => token.startsWith(word)))) {
-      weight += 25;
-    }
-    if (hasNegativeName(tokens)) weight -= 25;
-    return weight;
-  }
-
-  /**
+   * A short hash of a text (32-bit FNV-1a), to recognize the same text.
    * @param {string} text
-   * @return {number} Number of commas, including CJK and Arabic commas.
+   * @return {string}
    */
-  function countCommas(text) {
-    return (text.match(/[,،、，]/g) || []).length;
-  }
-
-  /**
-   * Whether an element without nested blocks counts as a paragraph for the
-   * content detection.
-   * @param {string} tagName Lower case.
-   * @param {boolean} hasLineBreak Whether it has a <br> child.
-   * @return {boolean}
-   */
-  function countsAsParagraph(tagName, hasLineBreak) {
-    return CONFIG.blockTags.includes(tagName) ||
-        (CONFIG.textContainerTags.includes(tagName) && hasLineBreak);
-  }
-
-  /**
-   * Whether a container holds enough paragraph text to be the content root.
-   * @param {!Array<{textLength: number}>} paragraphs
-   * @return {boolean}
-   */
-  function hasEnoughText(paragraphs) {
-    let total = 0;
-    for (const paragraph of paragraphs) total += paragraph.textLength;
-    return total >= CONFIG.scoring.minText;
-  }
-
-  /**
-   * Content score of one paragraph (Readability): one point, one per comma
-   * and one per 100 characters, up to three.
-   * @param {{textLength: number, commaCount: number}} paragraph
-   * @return {number}
-   */
-  function paragraphScore(paragraph) {
-    if (paragraph.textLength < CONFIG.scoring.minParagraphLength) return 0;
-    return 1 + paragraph.commaCount +
-        Math.min(Math.floor(paragraph.textLength / 100), 3);
-  }
-
-  /**
-   * Share of a paragraph's score that an ancestor receives: the parent all,
-   * the grandparent half, then 1 / (3 · depth).
-   * @param {number} depth 0 for the parent.
-   * @return {number}
-   */
-  function ancestorShare(depth) {
-    if (depth === 0) return 1;
-    if (depth === 1) return 0.5;
-    return 1 / (depth * 3);
-  }
-
-  /**
-   * @param {string} tagName Lower case.
-   * @return {number} Initial score by element type (Readability).
-   */
-  function tagBaseScore(tagName) {
-    switch (tagName) {
-      case 'div':
-      case 'article':
-        return 5;
-      case 'pre':
-      case 'td':
-      case 'blockquote':
-        return 3;
-      case 'address':
-      case 'ol':
-      case 'ul':
-      case 'dl':
-      case 'dd':
-      case 'dt':
-      case 'li':
-      case 'form':
-        return -3;
-      case 'h1':
-      case 'h2':
-      case 'h3':
-      case 'h4':
-      case 'h5':
-      case 'h6':
-      case 'th':
-        return -5;
-      default:
-        return 0;
+  function hashText(text) {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < text.length; index++) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
     }
+    return (hash >>> 0).toString(36);
   }
 
   /**
-   * Readability-like score of a content container: element type, class
-   * names, amount of text, paragraphs and commas, reduced by the share of
-   * link text.
-   * @param {!ContainerFeatures} features
-   * @return {number}
+   * @param {string} href
+   * @return {string} The URL without its hash, which marks a place on the
+   *     same page.
    */
-  function scoreContainer(features) {
-    let score = tagBaseScore(features.tagName) + classWeight(features.name);
-    for (const paragraph of features.paragraphs) {
-      score += paragraphScore(paragraph) * ancestorShare(paragraph.depth);
-    }
-    return score * (1 - clamp(features.linkDensity, 0, 1));
+  function withoutHash(href) {
+    const index = href.indexOf('#');
+    return index < 0 ? href : href.slice(0, index);
   }
 
   /**
-   * Picks the content container from scored candidates. Starts with the best
-   * score and moves to the parent if it scores almost as well or holds
-   * another substantial candidate (text split into sections).
-   * @param {!Array<!ScoredCandidate>} candidates
-   * @return {number} Index, -1 if no candidate has a positive score.
+   * Validates stored positions.
+   * @param {*} value
+   * @return {!Array<!Position>}
    */
-  function pickBestCandidate(candidates) {
-    let best = -1;
-    candidates.forEach((candidate, index) => {
-      if (candidate.score > 0 &&
-          (best < 0 || candidate.score > candidates[best].score)) {
-        best = index;
-      }
-    });
-    if (best < 0) return -1;
-    const top = candidates[best].score;
-    const parent = candidates[best].parent;
-    if (parent < 0) return best;
-    const hasSibling = candidates.some((candidate, index) =>
-      index !== best && candidate.parent === parent &&
-        candidate.score >= top * CONFIG.scoring.siblingRatio);
-    if (hasSibling) return parent;
-    while (candidates[best].parent >= 0 &&
-        candidates[candidates[best].parent].score >=
-            top * CONFIG.scoring.parentRatio) {
-      best = candidates[best].parent;
-    }
-    return best;
+  function sanitizePositions(value) {
+    if (!Array.isArray(value)) return [];
+    return value.filter((entry) => entry && typeof entry === 'object' &&
+        typeof entry.url === 'string' && typeof entry.hash === 'string' &&
+        Number.isInteger(entry.word) && entry.word > 0)
+        .slice(0, CONFIG.maxPositions)
+        .map((entry) => ({url: entry.url, hash: entry.hash, word: entry.word}));
   }
 
   /**
-   * @param {!Array<{parent: number}>} candidates
-   * @param {number} index
-   * @param {number} ancestor
-   * @return {boolean} Whether candidate ancestor contains candidate index.
+   * @param {!Array<!Position>} positions
+   * @param {!Position} position
+   * @return {!Array<!Position>} The positions with this one first, replacing
+   *     the one of the same page, and at most CONFIG.maxPositions.
    */
-  function isDescendant(candidates, index, ancestor) {
-    let current = candidates[index].parent;
-    for (let guard = 0; current >= 0 && guard < candidates.length; guard++) {
-      if (current === ancestor) return true;
-      current = candidates[current].parent;
-    }
-    return false;
+  function withPosition(positions, position) {
+    return [
+      position,
+      ...positions.filter((entry) => entry.url !== position.url),
+    ].slice(0, CONFIG.maxPositions);
   }
 
   /**
-   * Picks the content root among semantic elements (article, main): the one
-   * with the most text, or a nested one that holds most of that text (an
-   * article inside main next to a short comment section).
-   * @param {!Array<!SemanticCandidate>} candidates
-   * @return {number} Index or -1.
+   * @param {!Array<!Position>} positions
+   * @param {string} url
+   * @return {!Array<!Position>} The positions without the one of the page.
    */
-  function chooseSemanticRoot(candidates) {
-    let best = -1;
-    candidates.forEach((candidate, index) => {
-      if (candidate.textLength >= CONFIG.minSemanticText &&
-          (best < 0 || candidate.textLength > candidates[best].textLength)) {
-        best = index;
-      }
-    });
-    while (best >= 0) {
-      let child = -1;
-      candidates.forEach((candidate, index) => {
-        if (isDescendant(candidates, index, best) &&
-            (child < 0 ||
-             candidate.textLength > candidates[child].textLength)) {
-          child = index;
-        }
-      });
-      if (child < 0 || candidates[child].textLength <
-          candidates[best].textLength * CONFIG.semanticDominance) {
-        break;
-      }
-      best = child;
-    }
-    return best;
+  function withoutPosition(positions, url) {
+    return positions.filter((entry) => entry.url !== url);
+  }
+
+  /**
+   * @param {!Array<!Position>} positions
+   * @param {string} url
+   * @param {string} hash Hash of the text now on the page.
+   * @return {number} Remembered word index, 0 if there is none or the text
+   *     changed.
+   */
+  function rememberedWord(positions, url, hash) {
+    const entry = positions.find((position) => position.url === url);
+    return entry && entry.hash === hash ? entry.word : 0;
   }
 
   /** The pure functions, for unit tests. */
   const CORE = Object.freeze({
     config: CONFIG,
+    graphemes,
     stripFootnoteMarkers,
-    isFootnoteText,
     cleanText,
     letterCount,
     pauseAfter,
@@ -889,24 +787,24 @@
     tokenize,
     pivotIndex,
     pieceFactors,
+    rampFactor,
     suffixSums,
     pieceDuration,
     remainingMs,
     formatRemaining,
     jumpTarget,
+    resumeTarget,
+    stageAction,
     sanitizeSetting,
     sanitizeSettings,
     keyAction,
     fitWord,
-    nameTokens,
-    isExcludedName,
-    classWeight,
-    countsAsParagraph,
-    hasEnoughText,
-    paragraphScore,
-    scoreContainer,
-    pickBestCandidate,
-    chooseSemanticRoot,
+    hashText,
+    withoutHash,
+    sanitizePositions,
+    withPosition,
+    withoutPosition,
+    rememberedWord,
   });
 
   // Unit tests (tests/*.test.js) load this file with a hook instead of running
@@ -923,7 +821,8 @@
 
   // Script managers provide GM_* as local identifiers, not necessarily as
   // window properties.
-  /* global GM_getValue, GM_setValue, GM_registerMenuCommand */
+  /* global GM_getValue, GM_setValue, GM_registerMenuCommand,
+     GM_addValueChangeListener */
 
   /**
    * Elements of the reader overlay. themed lists the elements with colors
@@ -941,36 +840,37 @@
    *     fontSize: !HTMLInputElement, fontSizeValue: !HTMLElement,
    *     skip: !HTMLInputElement,
    *     themed: !Array<{element: !Element,
-   *         styles: !Object<string, string>}>}} Ui
+   *         styles: !Object<string, !ThemeKey>}>}} Ui
    */
 
   /**
-   * The reader. host holds the overlay in a closed shadow root; it is in the
-   * page only while the reader is open. index is the shown piece; finished
-   * tells that playback ran to the end, so that Play starts over. nextDue is
-   * the time (performance.now()) at which the next piece is due. body is the
-   * page body that the open reader made inert, viewport the viewport meta
-   * element it added to the page, and focus the element that had the focus
-   * before.
-   * @typedef {{host: !HTMLElement, shadow: !ShadowRoot, ui: !Ui,
-   *     text: !ReaderText, key: string, factors: !Array<number>,
-   *     sums: !Array<number>, index: number, playing: boolean,
-   *     finished: boolean, timer: number, nextDue: number,
-   *     darkQuery: !MediaQueryList, body: ?HTMLElement,
-   *     viewport: ?HTMLMetaElement, focus: ?HTMLElement}} Reader
+   * The reader. dialog is the modal dialog that holds the overlay; it is in
+   * the page only while the reader is open. host holds the interface in a
+   * closed shadow root. source tells where the text came from; hash
+   * identifies a page's text for the remembered position, and savedWord is
+   * the word last stored for it. index is the shown piece; finished tells
+   * that playback ran to the end, so that Play starts over. resumeRewind
+   * tells that playback was paused (not moved since), so that Play goes back
+   * a little. rampStep counts the pieces shown since playback started.
+   * nextDue is the time (performance.now()) at which the next piece is due.
+   * viewport is the viewport meta element the open reader added to the
+   * page, overflow the page's inline overflow style it replaced, and focus
+   * the element that had the focus before.
+   * @typedef {{dialog: !HTMLDialogElement, host: !HTMLElement,
+   *     shadow: !ShadowRoot, ui: !Ui, text: !ReaderText, key: string,
+   *     source: ('page'|'selection'), hash: string, savedWord: number,
+   *     factors: !Array<number>, sums: !Array<number>, index: number,
+   *     playing: boolean, finished: boolean, resumeRewind: boolean,
+   *     rampStep: number, timer: number, nextDue: number,
+   *     darkQuery: !MediaQueryList, viewport: ?HTMLMetaElement,
+   *     overflow: ?{value: string, priority: string},
+   *     focus: ?HTMLElement}} Reader
    */
 
   /**
-   * Text to read and the title of its page.
-   * @typedef {{title: string, paragraphs: !Array<!Paragraph>}} Content
-   */
-
-  /**
-   * Per-operation caches: page styles can change at any time, so they only
-   * live for one extraction.
-   * @typedef {{style: !WeakMap<!Element, !CSSStyleDeclaration>,
-   *     exclusion: !WeakMap<!Element, string>,
-   *     linkDensity: !WeakMap<!Element, number>}} Caches
+   * Text to read, the title of its page and where it came from.
+   * @typedef {{title: string, paragraphs: !Array<!Paragraph>,
+   *     source: ('page'|'selection')}} Content
    */
 
   /**
@@ -979,417 +879,23 @@
    * @property {!Settings} settings
    * @property {?Reader} reader Created on first use and kept after closing,
    *     so that the same text continues where it was.
-   * @property {!Caches} caches
    */
-
-  /** @return {!Caches} */
-  function newCaches() {
-    return {
-      style: new WeakMap(),
-      exclusion: new WeakMap(),
-      linkDensity: new WeakMap(),
-    };
-  }
 
   /** @type {!State} */
   const state = {
     settings: sanitizeSettings(null),
     reader: null,
-    caches: newCaches(),
   };
 
-  // ===========================================================================
-  // Classifying elements and text (from the Reading Ruler)
-  // ===========================================================================
-
-  const BLOCK_TAGS = new Set(CONFIG.blockTags);
-  const HEADING_TAGS = new Set(CONFIG.headingTags);
-  const EXCLUDED_TAGS = new Set(CONFIG.excludedTags);
-  const EXCLUDED_ROLES = new Set(CONFIG.excludedRoles);
-  // Paragraph-like elements for the content detection.
-  const PARAGRAPH_SELECTOR =
-      [...CONFIG.blockTags, ...CONFIG.textContainerTags].join(', ');
-  const SEMANTIC_SELECTOR = 'article, main, [role="main"]';
-
-  /**
-   * Cached getComputedStyle.
-   * @param {!Element} element
-   * @return {!CSSStyleDeclaration}
-   */
-  function styleOf(element) {
-    let style = state.caches.style.get(element);
-    if (!style) {
-      style = getComputedStyle(element);
-      state.caches.style.set(element, style);
-    }
-    return style;
-  }
-
-  /**
-   * @param {!Element} element
-   * @return {string} ID and class names.
-   */
-  function nameOf(element) {
-    return `${element.id} ${element.getAttribute('class') || ''}`;
-  }
-
-  /**
-   * @param {!Element} element
-   * @return {string} Text with collapsed white space.
-   */
-  function normalizedText(element) {
-    return (element.textContent || '').replace(/\s+/g, ' ').trim();
-  }
-
-  /**
-   * Whether a fixed or sticky element is a widget (header, toolbar, sidebar)
-   * rather than a layout shell that contains the whole page.
-   * @param {!Element} element
-   * @return {boolean}
-   */
-  function isWidgetSized(element) {
-    const rect = element.getBoundingClientRect();
-    return rect.width < window.innerWidth * CONFIG.widgetShare ||
-        rect.height < window.innerHeight * CONFIG.widgetShare;
-  }
-
-  /**
-   * Whether an element is hidden visually but kept for screen readers
-   * (absolutely positioned and clipped or 1 px small).
-   * @param {!Element} element
-   * @param {!CSSStyleDeclaration} style
-   * @return {boolean}
-   */
-  function isVisuallyHidden(element, style) {
-    if (style.position !== 'absolute' && style.position !== 'fixed') {
-      return false;
-    }
-    if (style.clip && style.clip !== 'auto') return true;
-    const rect = element.getBoundingClientRect();
-    return rect.width <= 1 || rect.height <= 1;
-  }
-
-  /**
-   * Whether an element is a footnote reference: a superscript or link with
-   * a marker such as "[1]" that links to a place on the same page.
-   * @param {!Element} element
-   * @return {boolean}
-   */
-  function isFootnoteReference(element) {
-    const tag = element.localName;
-    if (tag !== 'sup' && tag !== 'a') return false;
-    if (!isFootnoteText(normalizedText(element))) return false;
-    const link = tag === 'a' ?
-        element :
-        element.querySelector('a[href]') || element.closest('a[href]');
-    return !!link && (link.getAttribute('href') || '').startsWith('#');
-  }
-
-  /**
-   * @param {!Element} element
-   * @return {string} Why the element's subtree has no body text: 'hard'
-   *     (landmark, control, code, hidden, fixed …), 'name' (only its ID or
-   *     classes suggest so) or '' if it may contain body text.
-   */
-  function computeExclusion(element) {
-    const tag = element.localName;
-    if (EXCLUDED_TAGS.has(tag)) return 'hard';
-    if (tag === 'header' && !element.parentElement?.closest('article')) {
-      return 'hard';
-    }
-    const role = (element.getAttribute('role') || '').trim().toLowerCase()
-        .split(/\s+/)[0];
-    if (EXCLUDED_ROLES.has(role)) return 'hard';
-    if (element.getAttribute('aria-hidden') === 'true') return 'hard';
-    if (element instanceof HTMLElement && element.isContentEditable) {
-      return 'hard';
-    }
-    const style = styleOf(element);
-    if (style.display === 'none' || style.visibility === 'hidden' ||
-        style.visibility === 'collapse') {
-      return 'hard';
-    }
-    // Code blocks styled as blocks, without a pre element.
-    if (tag === 'code' && style.display === 'block') return 'hard';
-    const pinned = style.position === 'fixed' ||
-        (style.position === 'sticky' && !BLOCK_TAGS.has(tag));
-    if (pinned && isWidgetSized(element)) return 'hard';
-    if (isVisuallyHidden(element, style)) return 'hard';
-    if (isFootnoteReference(element)) return 'hard';
-    if (isExcludedName(nameOf(element))) return 'name';
-    return '';
-  }
-
-  /**
-   * Cached computeExclusion.
-   * @param {!Element} element
-   * @return {string}
-   */
-  function exclusionOf(element) {
-    let result = state.caches.exclusion.get(element);
-    if (result === undefined) {
-      result = computeExclusion(element);
-      state.caches.exclusion.set(element, result);
-    }
-    return result;
-  }
-
-  /**
-   * @param {!Element} element
-   * @return {number} Share of the element's text inside links.
-   */
-  function linkDensityOf(element) {
-    let result = state.caches.linkDensity.get(element);
-    if (result === undefined) {
-      result = 0;
-      const length = normalizedText(element).length;
-      if (length) {
-        let links = 0;
-        for (const link of element.querySelectorAll('a')) {
-          links += normalizedText(link).length;
-        }
-        result = links / length;
-      }
-      state.caches.linkDensity.set(element, result);
-    }
-    return result;
-  }
-
-  /**
-   * Whether a block consists mostly of links (link lists, "read more").
-   * Headings are never link-heavy: a linked title is still a title.
-   * @param {!Element} block
-   * @return {boolean}
-   */
-  function isLinkHeavy(block) {
-    return !HEADING_TAGS.has(block.localName) &&
-        linkDensityOf(block) > CONFIG.maxLinkDensity;
-  }
-
-  /**
-   * @param {!Element} element
-   * @return {boolean} Whether the element is laid out as a block, so that
-   *     text directly inside it forms a paragraph of its own.
-   */
-  function isBlockLike(element) {
-    return CONFIG.blockDisplays.includes(styleOf(element).display);
-  }
-
-  /**
-   * Whether an element and its ancestors below a container may contain body
-   * text.
-   * @param {!Element} element
-   * @param {!Element} container Not checked itself.
-   * @return {boolean}
-   */
-  function isIncluded(element, container) {
-    for (let node = /** @type {?Element} */ (element);
-      node && node !== container; node = node.parentElement) {
-      if (exclusionOf(node)) return false;
-    }
-    return true;
-  }
-
-  /**
-   * Returns the block (paragraph, list item, heading …) that a text node
-   * belongs to, or null if it is not read: blank, in an excluded element or
-   * in a link-heavy block. Text outside every block tag (a <div> with <br>,
-   * a table cell) belongs to its nearest block-like ancestor.
-   * @param {!Text} text
-   * @param {!Element} root
-   * @return {?Element}
-   */
-  function blockOf(text, root) {
-    if (!/\S/.test(text.data)) return null;
-    /** @type {?Element} */
-    let block = null;
-    /** @type {?Element} */
-    let container = null;
-    for (let element = text.parentElement; element && element !== root;
-      element = element.parentElement) {
-      if (exclusionOf(element)) return null;
-      if (block) continue;
-      if (BLOCK_TAGS.has(element.localName)) {
-        block = element;
-      } else if (!container && isBlockLike(element)) {
-        container = element;
-      }
-    }
-    if (!block && BLOCK_TAGS.has(root.localName)) block = root;
-    if (!block) block = container || root;
-    return isLinkHeavy(block) ? null : block;
-  }
-
-  // ===========================================================================
-  // Content root (Readability-like heuristics, from the Reading Ruler)
-  // ===========================================================================
-
-  /**
-   * Text directly inside a text container, outside its nested
-   * paragraph-like elements: split at those elements into runs, like the
-   * paragraphs Readability wraps such text in. Excluded children and runs
-   * that consist mostly of links are left out.
-   * @param {!Element} element
-   * @return {!Array<string>} Runs with collapsed white space.
-   */
-  function looseTextRuns(element) {
-    /** @type {!Array<string>} */
-    const runs = [];
-    /** @type {!Array<string>} */
-    let parts = [];
-    let linkLength = 0;
-    const flush = () => {
-      const text = parts.join(' ').replace(/\s+/g, ' ').trim();
-      if (text && linkLength / text.length <= CONFIG.maxLinkDensity) {
-        runs.push(text);
-      }
-      parts = [];
-      linkLength = 0;
-    };
-    for (const child of element.childNodes) {
-      if (child.nodeType === Node.TEXT_NODE) {
-        parts.push(/** @type {!Text} */ (child).data);
-      } else if (child instanceof Element) {
-        if (child.matches(PARAGRAPH_SELECTOR) ||
-            child.querySelector(PARAGRAPH_SELECTOR)) {
-          flush();
-        } else if (!exclusionOf(child)) {
-          parts.push(child.textContent || '');
-          const links = child.localName === 'a' ?
-              [child] :
-              child.querySelectorAll('a');
-          for (const link of links) linkLength += normalizedText(link).length;
-        }
-      }
-    }
-    flush();
-    return runs;
-  }
-
-  /**
-   * Paragraphs below a container for the content detection: paragraph-like
-   * elements without nested ones, and the runs of text that a text
-   * container with nested ones breaks into lines next to them. Paragraphs
-   * outside the body text and link-heavy ones are left out.
-   * @param {!Element} container
-   * @return {!Array<{text: string, parent: ?Element}>} parent is the first
-   *     element whose score the paragraph raises.
-   */
-  function paragraphsIn(container) {
-    /** @type {!Array<{text: string, parent: ?Element}>} */
-    const paragraphs = [];
-    for (const element of container.querySelectorAll(PARAGRAPH_SELECTOR)) {
-      const hasLineBreak = !!element.querySelector(':scope > br');
-      const nested = !!element.querySelector(PARAGRAPH_SELECTOR);
-      const counts = nested ?
-          hasLineBreak && CONFIG.textContainerTags.includes(element.localName) :
-          countsAsParagraph(element.localName, hasLineBreak);
-      if (!counts || !isIncluded(element, container)) continue;
-      if (nested) {
-        for (const text of looseTextRuns(element)) {
-          paragraphs.push({text, parent: element});
-        }
-      } else if (!isLinkHeavy(element)) {
-        paragraphs.push({
-          text: normalizedText(element),
-          parent: element.parentElement,
-        });
-      }
-    }
-    return paragraphs;
-  }
-
-  /**
-   * Whether an element can be the content root: visible, not excluded
-   * itself and not inside a landmark, control or hidden element. Class names
-   * of ancestors are not checked: wrappers such as "page-with-sidebar"
-   * contain the content.
-   * @param {!Element} element
-   * @return {boolean}
-   */
-  function isRootCandidate(element) {
-    if (!element.getClientRects().length || exclusionOf(element)) return false;
-    for (let node = element.parentElement;
-      node && node !== document.documentElement; node = node.parentElement) {
-      if (exclusionOf(node) === 'hard') return false;
-    }
-    return true;
-  }
-
-  /**
-   * Finds the content root among article, main and [role="main"].
-   * @return {?Element}
-   */
-  function findSemanticRoot() {
-    const elements = [...document.querySelectorAll(SEMANTIC_SELECTOR)]
-        .filter(isRootCandidate);
-    const indices = new Map(elements.map((element, index) => [element, index]));
-    /** @type {!Array<!SemanticCandidate>} */
-    const candidates = elements.map((element) => {
-      let textLength = 0;
-      for (const paragraph of paragraphsIn(element)) {
-        textLength += paragraph.text.length;
-      }
-      let ancestor = element.parentElement?.closest(SEMANTIC_SELECTOR);
-      while (ancestor && !indices.has(ancestor)) {
-        ancestor = ancestor.parentElement?.closest(SEMANTIC_SELECTOR);
-      }
-      return {textLength, parent: ancestor ? indices.get(ancestor) ?? -1 : -1};
-    });
-    const index = chooseSemanticRoot(candidates);
-    return index >= 0 ? elements[index] : null;
-  }
-
-  /**
-   * Finds the content root by scoring the ancestors of all paragraphs, like
-   * Readability.
-   * @return {?Element} null if no container holds enough text.
-   */
-  function findScoredRoot() {
-    if (!document.body) return null;
-    /** @type {!Map<!Element, !ContainerFeatures>} */
-    const features = new Map();
-    for (const {text, parent} of paragraphsIn(document.body)) {
-      if (text.length < CONFIG.scoring.minParagraphLength) continue;
-      let ancestor = parent;
-      for (let depth = 0; ancestor && ancestor !== document.documentElement &&
-        depth < CONFIG.scoring.maxDepth; depth++) {
-        let entry = features.get(ancestor);
-        if (!entry) {
-          entry = {
-            tagName: ancestor.localName,
-            name: nameOf(ancestor),
-            paragraphs: [],
-            linkDensity: 0,
-          };
-          features.set(ancestor, entry);
-        }
-        entry.paragraphs.push({
-          textLength: text.length,
-          commaCount: countCommas(text),
-          depth,
-        });
-        ancestor = ancestor.parentElement;
-      }
-    }
-    const elements = [...features.keys()];
-    const indices = new Map(elements.map((element, index) => [element, index]));
-    const candidates = elements.map((element) => {
-      const entry = /** @type {!ContainerFeatures} */ (features.get(element));
-      entry.linkDensity = linkDensityOf(element);
-      let parent = element.parentElement;
-      while (parent && !features.has(parent)) parent = parent.parentElement;
-      return {
-        score: scoreContainer(entry),
-        parent: parent ? indices.get(parent) ?? -1 : -1,
-      };
-    });
-    const index = pickBestCandidate(candidates);
-    if (index < 0) return null;
-    const element = elements[index];
-    const entry = /** @type {!ContainerFeatures} */ (features.get(element));
-    return hasEnoughText(entry.paragraphs) ? element : null;
-  }
+  // Content detection (lib/content-detection.js). Code is not read, nor what
+  // a screen reader would skip; footnote links are left out.
+  const detector = ContentDetection.createDetector({
+    codeBlocks: 'skip',
+    skipAriaHidden: true,
+    skipFootnoteReferences: true,
+    requireBlockLikeRoot: false,
+  });
+  const HEADING_TAGS = new Set(ContentDetection.config.headingTags);
 
   // ===========================================================================
   // Text extraction
@@ -1417,7 +923,7 @@
    *     content.
    */
   function pageParagraphs() {
-    const root = findSemanticRoot() || findScoredRoot();
+    const root = detector.findRoot();
     if (!root) return [];
     /** @type {!Array<!Paragraph>} */
     const paragraphs = [];
@@ -1438,7 +944,7 @@
             return NodeFilter.FILTER_ACCEPT;
           }
           const element = /** @type {!Element} */ (node);
-          if (exclusionOf(element)) return NodeFilter.FILTER_REJECT;
+          if (detector.exclusionOf(element)) return NodeFilter.FILTER_REJECT;
           return element.localName === 'br' ?
               NodeFilter.FILTER_ACCEPT :
               NodeFilter.FILTER_SKIP;
@@ -1448,7 +954,7 @@
         parts.push(' ');
         continue;
       }
-      const owner = blockOf(/** @type {!Text} */ (node), root);
+      const owner = detector.blockOf(/** @type {!Text} */ (node), root);
       if (!owner) continue;
       if (owner !== block) {
         flush();
@@ -1466,9 +972,12 @@
    * @return {!Content}
    */
   function extractContent() {
-    state.caches = newCaches();
+    detector.resetCaches();
     const title = document.title.trim() || location.hostname;
-    return {title, paragraphs: selectedParagraphs() || pageParagraphs()};
+    const selected = selectedParagraphs();
+    return selected ?
+        {title, paragraphs: selected, source: 'selection'} :
+        {title, paragraphs: pageParagraphs(), source: 'page'};
   }
 
   // ===========================================================================
@@ -1509,6 +1018,8 @@
     },
   });
 
+  /** @typedef {keyof typeof THEMES.light} ThemeKey */
+
   const READER_STYLES = `
     .sr-button:focus-visible,
     .sr-input:focus-visible {
@@ -1518,6 +1029,10 @@
 
     .sr-button:not(:disabled):hover {
       filter: brightness(.94);
+    }
+
+    .sr-context-word:hover {
+      text-decoration: underline;
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -1540,15 +1055,23 @@
   const FONT = '16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, ' +
       'sans-serif';
 
+  // Events in the reader that do not reach the page's listeners. Key events
+  // are stopped earlier, by onWindowKey.
+  const CONTAINED_EVENTS = ['auxclick', 'click', 'contextmenu', 'dblclick',
+    'input', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchend',
+    'touchmove', 'touchstart', 'wheel'];
+
   /**
    * Sets inline styles.
    * @param {!Element} element
    * @param {!Object<string, string>} styles CSS property names and values.
+   * @param {string=} priority 'important' to win over the page's style
+   *     sheets.
    */
-  function setStyles(element, styles) {
+  function setStyles(element, styles, priority = '') {
     const style = /** @type {!HTMLElement} */ (element).style;
     for (const [name, value] of Object.entries(styles)) {
-      style.setProperty(name, value);
+      style.setProperty(name, value, priority);
     }
   }
 
@@ -1619,11 +1142,14 @@
    * @return {!Ui}
    */
   function buildUi() {
-    /** @type {!Array<{element: !Element, styles: !Object<string, string>}>} */
+    /**
+     * @type {!Array<{element: !Element,
+     *     styles: !Object<string, !ThemeKey>}>}
+     */
     const themed = [];
     /**
      * @param {!Element} element
-     * @param {!Object<string, string>} styles Theme keys by CSS property.
+     * @param {!Object<string, !ThemeKey>} styles Theme keys by CSS property.
      * @return {!Element}
      */
     const theme = (element, styles) => {
@@ -1662,9 +1188,6 @@
       'width': '100%',
     }, 'sr-panel');
     panel.tabIndex = -1;
-    panel.setAttribute('role', 'dialog');
-    panel.setAttribute('aria-modal', 'true');
-    panel.setAttribute('aria-label', 'Speed Reader');
     theme(panel, {'background': 'background', 'color': 'text'});
 
     const header = createElement('div', {
@@ -1717,7 +1240,8 @@
       'touch-action': 'manipulation',
       'user-select': 'none',
     }, 'sr-stage');
-    stage.title = 'Play or pause (Space)';
+    stage.title = 'Play or pause (Space). On a touch screen, tap near the ' +
+        'left or right edge to skip back or forward.';
 
     const guide = createElement('div', {
       'border-style': 'solid',
@@ -1773,6 +1297,8 @@
     }, 'sr-message');
     stage.append(guide, word, message);
 
+    // While paused: the current sentence, whose words can be clicked to go
+    // to them.
     const context = createElement('p', {
       'font-size': '16px',
       'height': '4.2em',
@@ -1781,6 +1307,7 @@
       'position': 'relative',
       'text-align': 'center',
     }, 'sr-context');
+    context.title = 'Click a word to go to it';
     theme(context, {'color': 'muted'});
 
     const track = createElement('div', {
@@ -1873,13 +1400,12 @@
     });
     /**
      * @param {string} label
-     * @param {string} name Key of CONFIG.settings.
+     * @param {!SettingName} name
      * @param {string} type 'range' or 'number'.
      * @return {{input: !HTMLInputElement, value: !HTMLElement}}
      */
     const createSetting = (label, name, type) => {
-      const range = /** @type {!Object<string, !Range>} */ (
-        CONFIG.settings)[name];
+      const range = CONFIG.settings[name];
       const field = createElement('label', {
         'align-items': 'center',
         'display': 'flex',
@@ -1966,11 +1492,10 @@
 
   /**
    * @param {!Reader} reader
-   * @return {!Object<string, string>} The light or dark colors.
+   * @return {!Readonly<!Record<!ThemeKey, string>>} The light or dark colors.
    */
   function colorsOf(reader) {
-    return /** @type {!Object<string, string>} */ (
-      reader.darkQuery.matches ? THEMES.dark : THEMES.light);
+    return reader.darkQuery.matches ? THEMES.dark : THEMES.light;
   }
 
   /**
@@ -2019,10 +1544,6 @@
    */
   function renderWord(reader) {
     const {ui, text} = reader;
-    const size = state.settings.fontSize;
-    ui.guide.style.setProperty('height', `${Math.round(size * 1.7)}px`);
-    ui.stage.style.setProperty('min-height',
-        `${Math.max(160, Math.round(size * 2.6))}px`);
     const piece = text.pieces[reader.index];
     if (!piece) {
       ui.before.textContent = '';
@@ -2030,7 +1551,8 @@
       ui.after.textContent = '';
       return;
     }
-    const chars = Array.from(piece.text);
+    const size = state.settings.fontSize;
+    const chars = graphemes(piece.text);
     const pivot = pivotIndex(piece.text);
     ui.before.textContent = chars.slice(0, pivot).join('');
     ui.pivot.textContent = chars[pivot] || '';
@@ -2051,7 +1573,7 @@
 
   /**
    * Shows the current sentence below the word while paused, with the
-   * current word marked.
+   * current word marked. Each word can be clicked to go to it.
    * @param {!Reader} reader
    */
   function renderContext(reader) {
@@ -2060,52 +1582,39 @@
     ui.context.style.setProperty('visibility',
         reader.playing || !piece ? 'hidden' : 'visible');
     if (reader.playing || !piece) return;
-    const current = text.words[piece.word];
-    const sentence = text.sentences[current.sentence];
-    /**
-     * @param {number} from
-     * @param {number} to
-     * @return {string}
-     */
-    const join = (from, to) => text.words.slice(from, to)
-        .map((word) => word.text).join(' ');
-    const mark = createElement('mark', {
-      'background': 'transparent',
-      'color': colorsOf(reader).mark,
-      'font-weight': '600',
-    }, 'sr-mark');
-    mark.textContent = current.text;
-    const head = join(sentence.start, piece.word);
-    const tail = join(piece.word + 1, sentence.end);
-    ui.context.replaceChildren(
-        head ? `${head} ` : '', mark, tail ? ` ${tail}` : '');
-    ui.context.scrollTop = Math.max(0,
-        mark.offsetTop - (ui.context.clientHeight - mark.offsetHeight) / 2);
+    const sentence = text.sentences[text.words[piece.word].sentence];
+    /** @type {!Array<!Node|string>} */
+    const nodes = [];
+    /** @type {?HTMLElement} */
+    let mark = null;
+    for (let index = sentence.start; index < sentence.end; index++) {
+      const current = index === piece.word;
+      const element = current ?
+          createElement('mark', {
+            'background': 'transparent',
+            'color': colorsOf(reader).mark,
+            'font-weight': '600',
+          }, 'sr-mark') :
+          createElement('span', {'cursor': 'pointer'}, 'sr-context-word');
+      element.dataset['word'] = String(index);
+      element.textContent = text.words[index].text;
+      if (current) mark = element;
+      if (nodes.length) nodes.push(' ');
+      nodes.push(element);
+    }
+    ui.context.replaceChildren(...nodes);
+    if (mark) {
+      ui.context.scrollTop = Math.max(0, mark.offsetTop -
+          (ui.context.clientHeight - mark.offsetHeight) / 2);
+    }
   }
 
   /**
-   * Updates everything that depends on the position, the playback state and
-   * the settings.
+   * Updates the progress bar, the position and the remaining time.
    * @param {!Reader} reader
    */
-  function render(reader) {
+  function renderProgress(reader) {
     const {ui, text} = reader;
-    const empty = !text.pieces.length;
-    const settings = state.settings;
-    ui.message.style.setProperty('display', empty ? 'flex' : 'none');
-    ui.message.textContent = empty ?
-        'No text found on this page. Select the text you want to read, ' +
-            'then start Speed Reader again.' :
-        '';
-    ui.guide.style.setProperty('visibility', empty ? 'hidden' : 'visible');
-    for (const button of [ui.back, ui.play, ui.forward]) {
-      button.disabled = empty;
-      button.style.setProperty('opacity', empty ? '.45' : '1');
-      button.style.setProperty('cursor', empty ? 'default' : 'pointer');
-    }
-    renderWord(reader);
-    renderContext(reader);
-
     const piece = text.pieces[reader.index];
     const word = piece ? piece.word : 0;
     const words = text.words.length;
@@ -2116,14 +1625,45 @@
     ui.remaining.textContent = words ?
         formatRemaining(reader.finished ?
             0 :
-            remainingMs(reader.sums, reader.index, settings.wpm)) :
+            remainingMs(reader.sums, reader.index, state.settings.wpm)) :
         '';
+  }
 
+  /**
+   * Updates the Play button and the sentence shown while paused.
+   * @param {!Reader} reader
+   */
+  function renderPlayState(reader) {
+    const {ui} = reader;
     const label = reader.playing ? 'Pause' : 'Play';
     ui.playLabel.textContent = label;
     ui.play.setAttribute('aria-label', label);
     ui.play.title = `${label} (Space)`;
     ui.playIcon.setAttribute('d', reader.playing ? ICONS.pause : ICONS.play);
+    renderContext(reader);
+  }
+
+  /**
+   * Updates everything that depends on the position and the playback state.
+   * @param {!Reader} reader
+   */
+  function renderPosition(reader) {
+    renderWord(reader);
+    renderProgress(reader);
+    renderPlayState(reader);
+  }
+
+  /**
+   * Updates everything that depends on the settings.
+   * @param {!Reader} reader
+   */
+  function renderSettings(reader) {
+    const {ui} = reader;
+    const settings = state.settings;
+    const size = settings.fontSize;
+    ui.guide.style.setProperty('height', `${Math.round(size * 1.7)}px`);
+    ui.stage.style.setProperty('min-height',
+        `${Math.max(160, Math.round(size * 2.6))}px`);
     ui.back.title = `Back ${settings.skip} words (←)`;
     ui.back.setAttribute('aria-label', `Back ${settings.skip} words`);
     ui.forward.title = `Forward ${settings.skip} words (→)`;
@@ -2136,6 +1676,30 @@
     if (reader.shadow.activeElement !== ui.skip) {
       ui.skip.value = String(settings.skip);
     }
+    renderWord(reader);
+    renderProgress(reader);
+  }
+
+  /**
+   * Updates everything: after new content was loaded.
+   * @param {!Reader} reader
+   */
+  function render(reader) {
+    const {ui} = reader;
+    const empty = !reader.text.pieces.length;
+    ui.message.style.setProperty('display', empty ? 'flex' : 'none');
+    ui.message.textContent = empty ?
+        'No text found on this page. Select the text you want to read, ' +
+            'then start Speed Reader again.' :
+        '';
+    ui.guide.style.setProperty('visibility', empty ? 'hidden' : 'visible');
+    for (const button of [ui.back, ui.play, ui.forward]) {
+      button.disabled = empty;
+      button.style.setProperty('opacity', empty ? '.45' : '1');
+      button.style.setProperty('cursor', empty ? 'default' : 'pointer');
+    }
+    renderSettings(reader);
+    renderPlayState(reader);
   }
 
   // ===========================================================================
@@ -2153,8 +1717,8 @@
    * @return {number} Display time of the current piece in ms.
    */
   function currentDuration(reader) {
-    return pieceDuration(reader.factors[reader.index] || 1,
-        state.settings.wpm);
+    return pieceDuration((reader.factors[reader.index] || 1) *
+        rampFactor(reader.rampStep), state.settings.wpm);
   }
 
   /**
@@ -2180,20 +1744,26 @@
    */
   function advance(reader) {
     reader.timer = 0;
-    if (!reader.playing || !reader.host.isConnected) return;
+    if (!reader.playing || !reader.dialog.isConnected) return;
     if (reader.index >= reader.text.pieces.length - 1) {
       reader.playing = false;
       reader.finished = true;
-    } else {
-      reader.index++;
-      reader.nextDue += currentDuration(reader);
+      renderProgress(reader);
+      renderPlayState(reader);
+      savePosition(reader);
+      return;
     }
-    render(reader);
+    reader.index++;
+    reader.rampStep++;
+    reader.nextDue += currentDuration(reader);
+    renderWord(reader);
+    renderProgress(reader);
     schedule(reader);
   }
 
   /**
-   * Starts playback at the current piece, or from the start after the end.
+   * Starts playback at the current piece: from the start after the end, a
+   * little before the current piece after a pause.
    * @param {!Reader} reader
    */
   function play(reader) {
@@ -2201,18 +1771,28 @@
     if (reader.finished) {
       reader.index = 0;
       reader.finished = false;
+    } else if (reader.resumeRewind) {
+      reader.index = resumeTarget(reader.text, reader.index,
+          CONFIG.maxResumeRewind);
     }
+    reader.resumeRewind = false;
     reader.playing = true;
+    reader.rampStep = 0;
     reader.nextDue = performance.now() + currentDuration(reader);
-    render(reader);
+    renderPosition(reader);
     schedule(reader);
   }
 
-  /** @param {!Reader} reader */
+  /**
+   * Stops playback and remembers the position.
+   * @param {!Reader} reader
+   */
   function pause(reader) {
+    if (reader.playing) reader.resumeRewind = true;
     reader.playing = false;
     clearTimer(reader);
-    render(reader);
+    renderPlayState(reader);
+    savePosition(reader);
   }
 
   /** @param {!Reader} reader */
@@ -2225,36 +1805,72 @@
   }
 
   /**
+   * Goes to a piece; playback continues there.
+   * @param {!Reader} reader
+   * @param {number} index
+   */
+  function moveTo(reader, index) {
+    if (!reader.text.pieces.length) return;
+    reader.index = index;
+    reader.finished = false;
+    reader.resumeRewind = false;
+    if (reader.playing) {
+      reader.rampStep = 0;
+      reader.nextDue = performance.now() + currentDuration(reader);
+      schedule(reader);
+    }
+    renderPosition(reader);
+  }
+
+  /**
    * Skips words; playback continues at the new place.
    * @param {!Reader} reader
    * @param {number} direction 1 (forward) or -1 (back).
    */
   function skipWords(reader, direction) {
-    if (!reader.text.pieces.length) return;
-    reader.index = jumpTarget(reader.text, reader.index,
-        direction * state.settings.skip);
-    reader.finished = false;
-    if (reader.playing) {
-      reader.nextDue = performance.now() + currentDuration(reader);
-      schedule(reader);
-    }
-    render(reader);
+    moveTo(reader, jumpTarget(reader.text, reader.index,
+        direction * state.settings.skip));
   }
 
   /**
-   * Stores a changed setting and shows its effect.
+   * Changes a setting and shows its effect. While a slider is dragged, the
+   * setting is only stored when it is released.
    * @param {!Reader} reader
-   * @param {string} name Key of CONFIG.settings.
+   * @param {!SettingName} name
    * @param {*} value
+   * @param {boolean=} store
    */
-  function changeSetting(reader, name, value) {
-    const settings = /** @type {!Settings} */ ({
-      ...state.settings,
-      [name]: sanitizeSetting(name, value),
-    });
-    state.settings = settings;
-    GM_setValue(CONFIG.storageSettings, settings);
-    render(reader);
+  function changeSetting(reader, name, value, store = true) {
+    state.settings = {...state.settings, [name]: sanitizeSetting(name, value)};
+    if (store) GM_setValue(CONFIG.storageSettings, state.settings);
+    renderSettings(reader);
+  }
+
+  // ===========================================================================
+  // Remembered positions
+  // ===========================================================================
+
+  /** @return {!Array<!Position>} */
+  function loadPositions() {
+    return sanitizePositions(GM_getValue(CONFIG.storagePositions, []));
+  }
+
+  /**
+   * Stores the position in the text of the page, or forgets it at the start
+   * and the end of the text. Selected text has no stored position.
+   * @param {!Reader} reader
+   */
+  function savePosition(reader) {
+    const piece = reader.text.pieces[reader.index];
+    if (reader.source !== 'page' || !piece) return;
+    const word = reader.finished ? 0 : piece.word;
+    if (word === reader.savedWord) return;
+    reader.savedWord = word;
+    const url = withoutHash(location.href);
+    const positions = loadPositions();
+    GM_setValue(CONFIG.storagePositions, word ?
+        withPosition(positions, {url, hash: reader.hash, word}) :
+        withoutPosition(positions, url));
   }
 
   // ===========================================================================
@@ -2262,16 +1878,16 @@
   // ===========================================================================
 
   /**
-   * @param {?EventTarget} target
-   * @return {string} Kind of a focused element for keyAction.
+   * @param {?Element} element The focused element in the reader.
+   * @return {!TargetKind} Kind of a focused element for keyAction.
    */
-  function targetKind(target) {
-    if (target instanceof HTMLButtonElement) return 'button';
-    if (target instanceof HTMLInputElement) {
-      return target.type === 'range' ? 'range' : 'text';
+  function targetKind(element) {
+    if (element instanceof HTMLButtonElement) return 'button';
+    if (element instanceof HTMLInputElement) {
+      return element.type === 'range' ? 'range' : 'text';
     }
-    if (target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement) {
+    if (element instanceof HTMLTextAreaElement ||
+        element instanceof HTMLSelectElement) {
       return 'text';
     }
     return 'other';
@@ -2283,7 +1899,7 @@
    * @param {!KeyboardEvent} event
    */
   function onReaderKey(reader, event) {
-    const action = keyAction(event.key, targetKind(event.target),
+    const action = keyAction(event.key, targetKind(reader.shadow.activeElement),
         event.ctrlKey || event.altKey || event.metaKey);
     if (!action) return;
     event.preventDefault();
@@ -2300,17 +1916,63 @@
   }
 
   /**
+   * Key listener on the window in the capture phase, added at
+   * document-start before the page's own: while the reader is open, it
+   * handles the keys and keeps every key event from the page. Default
+   * actions (typing, moving a slider, pressing a button) still happen.
+   * @param {!KeyboardEvent} event
+   */
+  function onWindowKey(event) {
+    const reader = state.reader;
+    if (!reader || !reader.dialog.isConnected) return;
+    event.stopImmediatePropagation();
+    if (event.type === 'keydown') onReaderKey(reader, event);
+  }
+
+  /**
+   * Handles a click or tap on the word.
+   * @param {!Reader} reader
+   * @param {!MouseEvent} event
+   * @param {string} pointerType Of the press that led to the click.
+   */
+  function onStageClick(reader, event, pointerType) {
+    const box = reader.ui.stage.getBoundingClientRect();
+    const share = box.width ? (event.clientX - box.left) / box.width : 0.5;
+    const action = stageAction(share, pointerType);
+    if (action === 'toggle') {
+      togglePlay(reader);
+    } else {
+      skipWords(reader, action === 'back' ? -1 : 1);
+    }
+  }
+
+  /**
    * Adds the listeners of the reader. They stay attached while the reader
    * is closed, since it is opened again with the same elements.
    * @param {!Reader} reader
    */
   function attachReaderListeners(reader) {
-    const {ui} = reader;
+    const {ui, dialog} = reader;
     ui.close.addEventListener('click', () => closeReader(reader));
     ui.play.addEventListener('click', () => togglePlay(reader));
     ui.back.addEventListener('click', () => skipWords(reader, -1));
     ui.forward.addEventListener('click', () => skipWords(reader, 1));
-    ui.stage.addEventListener('click', () => togglePlay(reader));
+    let pointerType = '';
+    ui.stage.addEventListener('pointerdown', (event) => {
+      pointerType = event.pointerType;
+    });
+    ui.stage.addEventListener('click', (event) => {
+      onStageClick(reader, event, pointerType);
+      pointerType = '';
+    });
+    ui.context.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ?
+          event.target.closest('[data-word]') :
+          null;
+      const word = reader.text.words[Number(
+          target instanceof HTMLElement ? target.dataset['word'] : NaN)];
+      if (word) moveTo(reader, word.piece);
+    });
     // A click beside the panel closes the reader. A press that starts on
     // the panel (dragging a slider out of it) does not.
     let pressedBeside = false;
@@ -2320,10 +1982,14 @@
     ui.backdrop.addEventListener('click', (event) => {
       if (pressedBeside && event.target === ui.backdrop) closeReader(reader);
     });
-    ui.wpm.addEventListener('input',
-        () => changeSetting(reader, 'wpm', ui.wpm.value));
-    ui.fontSize.addEventListener('input',
-        () => changeSetting(reader, 'fontSize', ui.fontSize.value));
+    // Sliders store their value when released, not while dragged.
+    for (const name of /** @type {const} */ (['wpm', 'fontSize'])) {
+      const input = ui[name];
+      input.addEventListener('input',
+          () => changeSetting(reader, name, input.value, false));
+      input.addEventListener('change',
+          () => changeSetting(reader, name, input.value));
+    }
     ui.skip.addEventListener('input', () => {
       if (ui.skip.value.trim() && ui.skip.checkValidity()) {
         changeSetting(reader, 'skip', ui.skip.value);
@@ -2333,11 +1999,21 @@
       changeSetting(reader, 'skip', ui.skip.value);
       ui.skip.value = String(state.settings.skip);
     });
-    ui.backdrop.addEventListener('keydown',
-        (event) => onReaderKey(reader, event));
-    // Keys typed in the reader do not reach the page's shortcuts.
-    for (const type of ['keydown', 'keyup', 'keypress']) {
-      reader.host.addEventListener(type, (event) => event.stopPropagation());
+    // Escape (and the back gesture on Android) asks the dialog to close.
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeReader(reader);
+    });
+    // The page closed the dialog (close() or removing its open attribute).
+    // This observer, unlike the close event, also runs while the page is
+    // hidden. By the time it runs, closeReader may have removed the dialog
+    // already, or the reader may be open again.
+    new MutationObserver(() => {
+      if (!dialog.open) closeReader(reader);
+    }).observe(dialog, {attributes: true, attributeFilter: ['open']});
+    // Pointer and other events in the reader do not reach the page.
+    for (const type of CONTAINED_EVENTS) {
+      dialog.addEventListener(type, (event) => event.stopPropagation());
     }
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden' && reader.playing) {
@@ -2345,7 +2021,7 @@
       }
     });
     window.addEventListener('resize', () => {
-      if (!reader.host.isConnected) return;
+      if (!reader.dialog.isConnected) return;
       applyWidth(reader);
       renderWord(reader);
     });
@@ -2360,35 +2036,61 @@
   // ===========================================================================
 
   /**
-   * Creates the reader, closed.
+   * Creates the reader, closed: a dialog that holds the shadow host. Inline
+   * styles with priority win over the page's styles for dialogs.
    * @return {!Reader}
    */
   function createReader() {
+    const dialog = /** @type {!HTMLDialogElement} */ (
+      document.createElement('dialog'));
+    setStyles(dialog, {'all': 'initial'}, 'important');
+    setStyles(dialog, {
+      'display': 'block',
+      'height': '100%',
+      'inset': '0',
+      'max-height': 'none',
+      'max-width': 'none',
+      'position': 'fixed',
+      'width': '100%',
+      'z-index': '2147483647',
+    }, 'important');
+    dialog.setAttribute('aria-label', 'Speed Reader');
     const host = /** @type {!HTMLElement} */ (
       document.createElement('speed-reader'));
-    host.style.cssText = 'all: initial; display: block; inset: 0; ' +
-        'position: fixed; z-index: 2147483647;';
+    setStyles(host, {'all': 'initial'}, 'important');
+    setStyles(host, {
+      'display': 'block',
+      'height': '100%',
+      'width': '100%',
+    }, 'important');
     const shadow = host.attachShadow({mode: 'closed'});
     applyReaderStyles(shadow);
     const ui = buildUi();
     shadow.append(ui.backdrop);
+    dialog.append(host);
     /** @type {!Reader} */
     const reader = {
+      dialog,
       host,
       shadow,
       ui,
       text: {words: [], pieces: [], sentences: []},
       key: '\u0000',
+      source: 'page',
+      hash: '',
+      savedWord: 0,
       factors: [],
       sums: [0],
       index: 0,
       playing: false,
       finished: false,
+      resumeRewind: false,
+      rampStep: 0,
       timer: 0,
       nextDue: 0,
       darkQuery: window.matchMedia('(prefers-color-scheme: dark)'),
-      body: null,
       viewport: null,
+      overflow: null,
       focus: null,
     };
     attachReaderListeners(reader);
@@ -2396,21 +2098,19 @@
   }
 
   /**
-   * Puts the reader over the page. The page body becomes inert meanwhile,
-   * so that neither the focus nor clicks get to the page behind it. A page
-   * without a viewport meta element gets one: Firefox for Android lays such
-   * a page out for a desktop width, which would shrink the reader too. The
-   * minimum scale keeps a page that is wider than the screen from widening
-   * the area that the fixed reader covers.
+   * Puts the reader over the page as a modal dialog: in the top layer, above
+   * the page's own dialogs and pop-overs, with the rest of the page inert,
+   * so that neither the focus nor clicks get to it. The page does not
+   * scroll meanwhile. A page without a viewport meta element gets one:
+   * Firefox for Android lays such a page out for a desktop width, which
+   * would shrink the reader too. The minimum scale keeps a page that is
+   * wider than the screen from widening the area that the reader covers.
    * @param {!Reader} reader
    */
   function openReader(reader) {
-    if (reader.host.isConnected) return;
+    if (reader.dialog.isConnected) return;
     const active = document.activeElement;
     reader.focus = active instanceof HTMLElement ? active : null;
-    const body = document.body;
-    reader.body = body && !body.inert ? body : null;
-    if (reader.body) reader.body.inert = true;
     if (!document.querySelector('meta[name="viewport"]')) {
       const viewport = /** @type {!HTMLMetaElement} */ (
         document.createElement('meta'));
@@ -2420,22 +2120,43 @@
       (document.head || document.documentElement).append(viewport);
       reader.viewport = viewport;
     }
-    document.documentElement.append(reader.host);
+    const rootStyle = document.documentElement.style;
+    reader.overflow = {
+      value: rootStyle.getPropertyValue('overflow'),
+      priority: rootStyle.getPropertyPriority('overflow'),
+    };
+    rootStyle.setProperty('overflow', 'hidden', 'important');
+    document.documentElement.append(reader.dialog);
+    try {
+      reader.dialog.showModal();
+    } catch {
+      // Only if the page interferes with the dialog: show it on top of the
+      // page without making the page inert.
+      reader.dialog.setAttribute('open', '');
+    }
     applyTheme(reader);
     applyWidth(reader);
   }
 
   /**
    * Removes the reader from the page, paused, and gives the page its focus
-   * back.
+   * and scrolling back.
    * @param {!Reader} reader
    */
   function closeReader(reader) {
-    if (!reader.host.isConnected) return;
+    const {dialog} = reader;
+    if (!dialog.isConnected) return;
     pause(reader);
-    reader.host.remove();
-    if (reader.body) reader.body.inert = false;
-    reader.body = null;
+    if (dialog.open) dialog.close();
+    dialog.remove();
+    const rootStyle = document.documentElement.style;
+    if (reader.overflow?.value) {
+      rootStyle.setProperty('overflow', reader.overflow.value,
+          reader.overflow.priority);
+    } else {
+      rootStyle.removeProperty('overflow');
+    }
+    reader.overflow = null;
     reader.viewport?.remove();
     reader.viewport = null;
     reader.focus?.focus({preventScroll: true});
@@ -2443,8 +2164,8 @@
   }
 
   /**
-   * Shows new content in the reader, paused at its first word. The same text
-   * keeps its position.
+   * Shows new content in the reader, paused at its first word or at the
+   * position remembered for the page. The same text keeps its position.
    * @param {!Reader} reader
    * @param {!Content} content
    */
@@ -2454,16 +2175,26 @@
     reader.ui.heading.textContent = content.title;
     if (key === reader.key) {
       pause(reader);
+      render(reader);
       return;
     }
     clearTimer(reader);
     reader.text = tokenize(content.paragraphs);
     reader.key = key;
+    reader.source = content.source;
+    reader.hash = hashText(key);
     reader.factors = pieceFactors(reader.text);
     reader.sums = suffixSums(reader.factors);
-    reader.index = 0;
     reader.playing = false;
     reader.finished = false;
+    reader.resumeRewind = false;
+    const word = content.source === 'page' ?
+        rememberedWord(loadPositions(), withoutHash(location.href),
+            reader.hash) :
+        0;
+    const remembered = reader.text.words[word];
+    reader.index = remembered ? remembered.piece : 0;
+    reader.savedWord = remembered ? word : 0;
     render(reader);
   }
 
@@ -2481,7 +2212,7 @@
     reader.ui.panel.focus({preventScroll: true});
     // The layout may still change after this script ran (scroll bars).
     requestAnimationFrame(() => {
-      if (!reader.host.isConnected) return;
+      if (!reader.dialog.isConnected) return;
       applyWidth(reader);
       renderWord(reader);
     });
@@ -2490,6 +2221,20 @@
   // ===========================================================================
   // Menu command and startup
   // ===========================================================================
+
+  for (const type of ['keydown', 'keyup', 'keypress']) {
+    window.addEventListener(type,
+        (event) => onWindowKey(/** @type {!KeyboardEvent} */ (event)), true);
+  }
+
+  // Settings changed in another tab apply here too.
+  GM_addValueChangeListener(CONFIG.storageSettings,
+      (name, oldValue, value, remote) => {
+        if (!remote) return;
+        state.settings = sanitizeSettings(value);
+        const reader = state.reader;
+        if (reader && reader.dialog.isConnected) renderSettings(reader);
+      });
 
   GM_registerMenuCommand('Speed Reader: Read this page',
       () => showReader(extractContent()), {id: 'read', autoClose: true});

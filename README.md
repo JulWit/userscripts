@@ -8,7 +8,7 @@ A collection of my personal userscripts.
 |---|---|---|
 | [Steam Deal Score](scripts/steam-dealscore.user.js) | Shows a deal score (1–100) based on reviews, discount, price and popularity on the Steam wishlist, cart and store pages. | [Install](https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/steam-dealscore.user.js) |
 | [Reading Ruler](scripts/reading-ruler.user.js) | Highlights one line of an article at a time: click or tap a line, then move with the arrow keys (or floating buttons on touch devices). Stays off on pages without article-like content and can be disabled per site from the script menu. | [Install](https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/reading-ruler.user.js) |
-| [Speed Reader](scripts/speed-reader.user.js) | Shows the main text of a page, or the selected text, word by word in an overlay on the page (RSVP), aligned at a highlighted fixation letter. Play, pause, skip back and forward, adjustable speed and font size; started from the script menu. | [Install](https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/speed-reader.user.js) |
+| [Speed Reader](scripts/speed-reader.user.js) | Shows the main text of a page, or the selected text, word by word in an overlay on the page (RSVP), aligned at a highlighted fixation letter. Play, pause, skip back and forward (keys, buttons, or a tap near the edges of the word on touch screens), adjustable speed and font size; resumes a few words back after a pause, shows the current sentence while paused (click a word to go there) and remembers the position in the last 50 pages read (stored locally by the script manager). Started from the script menu. | [Install](https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/speed-reader.user.js) |
 
 ## Installation
 
@@ -20,7 +20,11 @@ Installed scripts update automatically from this repository.
 
 ## Development
 
-No build step. With [Node.js](https://nodejs.org/) 18+:
+No build step. The Reading Ruler and the Speed Reader share their detection
+of the main text of a page, `lib/content-detection.js`; they load it with
+`@require`, so the script manager installs it along with them.
+
+With [Node.js](https://nodejs.org/) 18+:
 
 ```bash
 node --test
