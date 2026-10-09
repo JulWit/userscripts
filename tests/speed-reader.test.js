@@ -522,7 +522,7 @@ describe('remembered positions', () => {
 
 describe('sanitizeSettings', () => {
   it('uses defaults for missing or invalid values', () => {
-    const defaults = {wpm: 300, fontSize: 48, skip: 10};
+    const defaults = {wpm: 300, fontSize: 48, skip: 10, readAloud: false};
     assert.deepEqual(core.sanitizeSettings(undefined), defaults);
     assert.deepEqual(core.sanitizeSettings('x'), defaults);
     assert.deepEqual(core.sanitizeSettings({wpm: 'fast', fontSize: NaN,
@@ -533,11 +533,11 @@ describe('sanitizeSettings', () => {
 
   it('clamps to the range and rounds to the step', () => {
     assert.deepEqual(core.sanitizeSettings({wpm: 5000, fontSize: 1,
-      skip: 7.4}), {wpm: 1000, fontSize: 24, skip: 7});
+      skip: 7.4}), {wpm: 1000, fontSize: 24, skip: 7, readAloud: false});
     assert.deepEqual(core.sanitizeSettings({wpm: 312, fontSize: 49,
-      skip: -3}), {wpm: 300, fontSize: 48, skip: 1});
+      skip: -3}), {wpm: 300, fontSize: 48, skip: 1, readAloud: false});
     assert.deepEqual(core.sanitizeSettings({wpm: 313, fontSize: 51,
-      skip: 50}), {wpm: 325, fontSize: 52, skip: 50});
+      skip: 50}), {wpm: 325, fontSize: 52, skip: 50, readAloud: false});
   });
 
   it('accepts numeric strings from inputs', () => {
@@ -681,5 +681,70 @@ describe('fitWord', () => {
   it('keeps empty words in place', () => {
     assert.deepEqual(core.fitWord({before: 0, pivot: 0, after: 0}, 500),
         {scale: 1, left: 500 * pivotShare});
+  });
+});
+
+describe('reading aloud', () => {
+  it('reads the words of a sentence with their offsets', () => {
+    const text = core.tokenize(paragraphs('Ships carried coal, grain – ' +
+        'and more. Then nothing.'));
+    const {start, end} = text.sentences[0];
+    assert.deepEqual(core.speechText(text.words, start, end), {
+      text: 'Ships carried coal, grain – and more.',
+      offsets: [0, 6, 14, 20, 28, 32],
+    });
+    assert.deepEqual(core.speechText(text.words, 3, end), {
+      text: 'grain – and more.',
+      offsets: [0, 8, 12],
+    });
+    assert.deepEqual(core.speechText(text.words, 2, 2),
+        {text: '', offsets: []});
+  });
+
+  it('finds the word of a word boundary', () => {
+    const offsets = [0, 6, 14, 20];
+    assert.equal(core.wordAtChar(offsets, 0), 0);
+    assert.equal(core.wordAtChar(offsets, 5), 0);
+    assert.equal(core.wordAtChar(offsets, 6), 1);
+    // Voices may report parts of a word ("1830" as several words).
+    assert.equal(core.wordAtChar(offsets, 16), 2);
+    assert.equal(core.wordAtChar(offsets, 20), 3);
+    assert.equal(core.wordAtChar(offsets, 999), 3);
+    assert.equal(core.wordAtChar([0], 7), 0);
+  });
+
+  it('turns the speed into a speech rate', () => {
+    const {wpmAtRate1, minRate, maxRate} = core.config.speech;
+    assert.equal(core.speechRate(wpmAtRate1), 1);
+    assert.equal(core.speechRate(wpmAtRate1 * 2), 2);
+    assert.equal(core.speechRate(1), minRate);
+    assert.equal(core.speechRate(1e6), maxRate);
+  });
+
+  it('picks a voice of the language, of the region and the default first',
+      () => {
+        const voices = [
+          {name: 'en-gb', lang: 'en-GB', default: false},
+          {name: 'de', lang: 'de-DE', default: true},
+          {name: 'en-us', lang: 'en-US', default: false},
+          {name: 'en-us-2', lang: 'en_US', default: false},
+          {name: 'de-at', lang: 'de-AT', default: false},
+        ];
+        const pick = (lang) => core.speechVoice(voices, lang)?.name ?? null;
+        assert.equal(pick('en-US'), 'en-us');
+        assert.equal(pick('en_us'), 'en-us');
+        assert.equal(pick('en'), 'en-gb');
+        assert.equal(pick('EN-AU'), 'en-gb');
+        assert.equal(pick('de'), 'de');
+        assert.equal(pick('de-AT'), 'de-at');
+        assert.equal(pick('fr'), null);
+        assert.equal(pick(''), null);
+        assert.equal(core.speechVoice([], 'en'), null);
+      });
+
+  it('is off unless stored as on', () => {
+    assert.equal(core.sanitizeSettings({readAloud: true}).readAloud, true);
+    assert.equal(core.sanitizeSettings({readAloud: 'yes'}).readAloud, false);
+    assert.equal(core.sanitizeSettings({}).readAloud, false);
   });
 });

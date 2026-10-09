@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.4.2
-// @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
+// @version      1.5.0
+// @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size, and can read it aloud
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
 // @supportURL   https://github.com/JulWit/userscripts/issues
@@ -30,6 +30,12 @@
  * playback starts a little slower and, after a pause, resumes a few words
  * back. The position in a page's text is remembered for the next visit,
  * except in private windows.
+ * Optionally, the text is read aloud by the browser's speech synthesis
+ * (Web Speech API, which Firefox's Reader View uses too): one sentence per
+ * utterance, with the speed setting as the speech rate. The voice then sets
+ * the pace, and the shown word follows its word boundary events; for a
+ * voice without them, the usual timing goes on, but waits at the end of
+ * each sentence until the voice has finished it.
  * The script registers menu commands and a key listener and does nothing
  * else until it is used. The reader is a modal dialog in the top layer with
  * its interface in a closed shadow root, rather than a window of its own,
@@ -87,9 +93,10 @@
    */
 
   /**
-   * Stored reader settings: words per minute, font size in px and the
-   * number of words that Back and Forward skip.
-   * @typedef {{wpm: number, fontSize: number, skip: number}} Settings
+   * Stored reader settings: words per minute, font size in px, the number
+   * of words that Back and Forward skip and whether the text is read aloud.
+   * @typedef {{wpm: number, fontSize: number, skip: number,
+   *     readAloud: boolean}} Settings
    */
 
   /** @typedef {('wpm'|'fontSize'|'skip')} SettingName */
@@ -118,6 +125,17 @@
   /**
    * What a click or tap on the word does.
    * @typedef {('back'|'toggle'|'forward')} StageAction
+   */
+
+  /**
+   * Text of an utterance that reads words aloud: offsets holds the index of
+   * the first character of each word in it.
+   * @typedef {{text: string, offsets: !Array<number>}} SpeechText
+   */
+
+  /**
+   * What speechVoice needs to know about a voice (SpeechSynthesisVoice).
+   * @typedef {{lang: string, default: boolean}} VoiceInfo
    */
 
   /**
@@ -170,6 +188,10 @@
     // After a pause, playback resumes at the start of the sentence, but at
     // most this many words back.
     maxResumeRewind: 5,
+    // Reading aloud: the speech rate is the speed in words per minute
+    // divided by wpmAtRate1 (about what voices speak at rate 1), within the
+    // range of the Web Speech API. Voices may limit it further.
+    speech: {wpmAtRate1: 180, minRate: 0.1, maxRate: 10},
     // Words with more characters are split, at hyphens and slashes first,
     // then into pieces of equal length with a hyphen. A cut may move up to
     // cutWindow characters to fall between a vowel and a consonant.
@@ -696,6 +718,7 @@
       wpm: sanitizeSetting('wpm', stored.wpm),
       fontSize: sanitizeSetting('fontSize', stored.fontSize),
       skip: sanitizeSetting('skip', stored.skip),
+      readAloud: stored.readAloud === true,
     };
   }
 
@@ -781,6 +804,90 @@
     }
     scale = clamp(scale, CONFIG.minScale, 1);
     return {scale, left: anchor - (widths.before + half) * scale};
+  }
+
+  // ===========================================================================
+  // Pure functions: reading aloud
+  // ===========================================================================
+
+  /**
+   * The text of an utterance that reads words aloud.
+   * @param {!Array<!Word>} words
+   * @param {number} start First word (inclusive).
+   * @param {number} end Last word (exclusive).
+   * @return {!SpeechText}
+   */
+  function speechText(words, start, end) {
+    /** @type {!Array<number>} */
+    const offsets = [];
+    let text = '';
+    for (let index = start; index < end; index++) {
+      if (text) text += ' ';
+      offsets.push(text.length);
+      text += words[index].text;
+    }
+    return {text, offsets};
+  }
+
+  /**
+   * The word that a word boundary event of an utterance points at.
+   * @param {!Array<number>} offsets From speechText.
+   * @param {number} charIndex SpeechSynthesisEvent.charIndex.
+   * @return {number} Index of the word in the utterance: the last one that
+   *     starts at or before the character.
+   */
+  function wordAtChar(offsets, charIndex) {
+    let word = 0;
+    while (word + 1 < offsets.length && offsets[word + 1] <= charIndex) {
+      word++;
+    }
+    return word;
+  }
+
+  /**
+   * @param {number} wpm
+   * @return {number} The speech rate for a speed (CONFIG.speech).
+   */
+  function speechRate(wpm) {
+    const {wpmAtRate1, minRate, maxRate} = CONFIG.speech;
+    return clamp(wpm / wpmAtRate1, minRate, maxRate);
+  }
+
+  /**
+   * @param {string} lang A language tag such as "de-DE" or "en_US".
+   * @return {string} The tag in lower case with hyphens.
+   */
+  function normalizeLang(lang) {
+    return lang.trim().toLowerCase().replace(/_/g, '-');
+  }
+
+  /**
+   * The voice for a text in a language: one of the same language, best of
+   * the same region too, and the browser's default voice among equals.
+   * @param {!Array<T>} voices
+   * @param {string} lang Language of the text, '' if unknown.
+   * @return {?T} null without a matching voice: the browser's default voice
+   *     reads the text then.
+   * @template {!VoiceInfo} T
+   */
+  function speechVoice(voices, lang) {
+    const wanted = normalizeLang(lang);
+    const language = wanted.split('-')[0];
+    if (!language) return null;
+    /** @type {?T} */
+    let best = null;
+    let bestScore = 0;
+    for (const voice of voices) {
+      const voiceLang = normalizeLang(voice.lang);
+      if (voiceLang.split('-')[0] !== language) continue;
+      const score = 1 + (voiceLang === wanted ? 2 : 0) +
+          (voice.default ? 1 : 0);
+      if (score > bestScore) {
+        best = voice;
+        bestScore = score;
+      }
+    }
+    return best;
   }
 
   // ===========================================================================
@@ -896,6 +1003,10 @@
     keyAction,
     wordFocusTarget,
     fitWord,
+    speechText,
+    wordAtChar,
+    speechRate,
+    speechVoice,
     hashText,
     withoutHash,
     pageKey,
@@ -936,15 +1047,25 @@
    *     forward: !HTMLButtonElement, labels: !Array<!HTMLElement>,
    *     wpm: !HTMLInputElement, wpmValue: !HTMLElement,
    *     fontSize: !HTMLInputElement, fontSizeValue: !HTMLElement,
-   *     skip: !HTMLInputElement,
-   *     themed: !Array<{element: !Element,
+   *     skip: !HTMLInputElement, readAloud: !HTMLInputElement,
+   *     readAloudField: !HTMLElement, readAloudLabel: !HTMLElement,
+   *     themed:!Array<{element: !Element,
    *         styles: !Object<string, !ThemeKey>}>}} Ui
+   */
+
+  /**
+   * The sentence being read aloud: its utterance, the words it reads (from
+   * start to end, exclusive) with their offsets in its text (speechText),
+   * and whether the voice has sent a word boundary event for it.
+   * @typedef {{utterance: !SpeechSynthesisUtterance, start: number,
+   *     end: number, offsets: !Array<number>, boundaries: boolean}} Speech
    */
 
   /**
    * The reader. dialog is the modal dialog that holds the overlay; it is in
    * the page only while the reader is open. host holds the interface in a
-   * closed shadow root. source tells where the text came from; page is the
+   * closed shadow root. source tells where the text came from and lang its
+   * language ('' if unknown); page is the
    * key of the page it came from (pageKey, taken when it was loaded, as a
    * web app may change the URL later), hash identifies the text for the
    * remembered position, and savedWord is the word last stored for it (or
@@ -954,6 +1075,8 @@
    * tells that playback was paused (not moved since), so that Play goes back
    * a little. rampStep counts the pieces shown since playback started.
    * nextDue is the time (performance.now()) at which the next piece is due.
+   * speech is the sentence being read aloud, null if none; speechFailed
+   * tells that the voice failed, so that playback went on without it.
    * viewport is the viewport meta element the open reader added to the
    * page, rootStyles the page's inline styles of the root element that it
    * replaced, and focus the element that had the focus before.
@@ -961,11 +1084,12 @@
    * created). draggedSlider is the slider the pointer is pressed on.
    * @typedef {{dialog: !HTMLDialogElement, host: !HTMLElement,
    *     shadow: !ShadowRoot, ui: !Ui, text: !ReaderText, key: string,
-   *     source: ('page'|'selection'), page: string, hash: string,
-   *     savedWord: number,
+   *     source: ('page'|'selection'), lang: string, page: string,
+   *     hash: string, savedWord: number,
    *     factors: !Array<number>, sums: !Array<number>, index: number,
    *     playing: boolean, finished: boolean, resumeRewind: boolean,
    *     rampStep: number, timer: number, nextDue: number,
+   *     speech: ?Speech, speechFailed: boolean,
    *     darkQuery: !MediaQueryList, viewport: ?HTMLMetaElement,
    *     rootStyles: !Array<{name: string, value: string, priority: string}>,
    *     backdropSheet: ?CSSStyleSheet, draggedSlider: ?HTMLInputElement,
@@ -973,9 +1097,10 @@
    */
 
   /**
-   * Text to read, the title of its page and where it came from.
+   * Text to read, the title of its page, where it came from and its
+   * language ('' if unknown).
    * @typedef {{title: string, paragraphs: !Array<!Paragraph>,
-   *     source: ('page'|'selection')}} Content
+   *     source: ('page'|'selection'), lang: string}} Content
    */
 
   /**
@@ -995,6 +1120,13 @@
     reader: null,
     heldKeys: new Set(),
   };
+
+  // The browser's speech synthesis, null if it has none (or it is turned
+  // off).
+  const SPEECH = typeof speechSynthesis === 'object' && speechSynthesis &&
+      typeof SpeechSynthesisUtterance === 'function' ?
+      speechSynthesis :
+      null;
 
   // Content detection (lib/content-detection.js). Read word by word, code,
   // tables of data (infoboxes) and lists of references are noise, as are
@@ -1121,6 +1253,16 @@
   }
 
   /**
+   * @param {?Node} node
+   * @return {string} The language of the node (its lang attribute or that
+   *     of an ancestor), '' if unknown.
+   */
+  function langOf(node) {
+    const element = node instanceof Element ? node : node?.parentElement;
+    return element?.closest('[lang]')?.getAttribute('lang')?.trim() || '';
+  }
+
+  /**
    * Collects the text to read: the selection if there is one, the main
    * text of the page otherwise.
    * @return {!Content}
@@ -1129,9 +1271,13 @@
     detector.resetCaches();
     const title = document.title.trim() || location.hostname;
     const selected = selectedParagraphs();
-    return selected ?
-        {title, paragraphs: selected, source: 'selection'} :
-        {title, paragraphs: pageParagraphs(), source: 'page'};
+    if (selected) {
+      const anchor = window.getSelection()?.anchorNode ?? null;
+      return {title, paragraphs: selected, source: 'selection',
+        lang: langOf(anchor)};
+    }
+    return {title, paragraphs: pageParagraphs(), source: 'page',
+      lang: langOf(document.documentElement)};
   }
 
   // ===========================================================================
@@ -1581,6 +1727,32 @@
     const skip = createSetting('Skip', 'skip', 'number');
     skip.value.textContent = 'words';
 
+    const readAloudField = createElement('label', {
+      'align-items': 'center',
+      'cursor': 'pointer',
+      'display': SPEECH ? 'flex' : 'none',
+      'flex': '0 1 auto',
+      'font-size': '14px',
+      'gap': '10px',
+      'min-height': '44px',
+    });
+    const readAloud = /** @type {!HTMLInputElement} */ (createElement(
+        'input', {
+          'cursor': 'pointer',
+          'height': '20px',
+          'margin': '0',
+          'width': '20px',
+        }, 'sr-input sr-read-aloud'));
+    readAloud.type = 'checkbox';
+    theme(readAloud, {'accent-color': 'fill'});
+    const readAloudLabel = createElement('span', {}, 'sr-read-aloud-label');
+    theme(readAloudLabel, {'color': 'muted'});
+    readAloudField.append(readAloud, readAloudLabel);
+    // Like the buttons: a click keeps the focus where it is.
+    readAloudField.addEventListener('mousedown',
+        (event) => event.preventDefault());
+    settings.append(readAloudField);
+
     panel.append(header, stage, context, track, status, controls, settings);
     backdrop.append(panel);
 
@@ -1611,6 +1783,9 @@
       fontSize: fontSize.input,
       fontSizeValue: fontSize.value,
       skip: skip.input,
+      readAloud,
+      readAloudField,
+      readAloudLabel,
       themed,
     };
   }
@@ -1838,8 +2013,24 @@
     if (reader.shadow.activeElement !== ui.skip) {
       ui.skip.value = String(settings.skip);
     }
+    ui.readAloud.checked = settings.readAloud;
+    renderReadAloud(reader);
     renderWord(reader);
     renderProgress(reader);
+  }
+
+  /**
+   * Updates the label of the Read aloud switch, which tells when the voice
+   * failed.
+   * @param {!Reader} reader
+   */
+  function renderReadAloud(reader) {
+    const failed = reader.speechFailed && state.settings.readAloud;
+    reader.ui.readAloudLabel.textContent =
+        failed ? 'Read aloud (no voice)' : 'Read aloud';
+    reader.ui.readAloudField.title = failed ?
+        'The browser could not read the text aloud' :
+        'Read the words aloud as they are shown';
   }
 
   /**
@@ -1901,18 +2092,27 @@
   }
 
   /**
-   * Shows the next piece, or stops at the end.
+   * Shows the next piece, or stops at the end. While reading aloud, the
+   * voice moves on to the next word (onSpeechBoundary) and to the next
+   * sentence (onSpeechEnd): the timer only shows the further pieces of a
+   * long word, or follows a voice without word boundary events up to the
+   * end of the sentence.
    * @param {!Reader} reader
    */
   function advance(reader) {
     reader.timer = 0;
     if (!reader.playing || !reader.dialog.isConnected) return;
+    const {speech} = reader;
+    if (speech) {
+      const current = reader.text.pieces[reader.index];
+      const next = reader.text.pieces[reader.index + 1];
+      if (!next || next.word >= speech.end ||
+          (speech.boundaries && next.word !== current.word)) {
+        return;
+      }
+    }
     if (reader.index >= reader.text.pieces.length - 1) {
-      reader.playing = false;
-      reader.finished = true;
-      renderProgress(reader);
-      renderPlayState(reader);
-      savePosition(reader);
+      finish(reader);
       return;
     }
     reader.index++;
@@ -1920,6 +2120,154 @@
     reader.nextDue += currentDuration(reader);
     renderWord(reader);
     renderProgress(reader);
+    schedule(reader);
+  }
+
+  /**
+   * Stops playback at the end of the text.
+   * @param {!Reader} reader
+   */
+  function finish(reader) {
+    reader.playing = false;
+    reader.finished = true;
+    renderProgress(reader);
+    renderPlayState(reader);
+    savePosition(reader);
+  }
+
+  /**
+   * @return {boolean} Whether playback reads the text aloud.
+   */
+  function readsAloud() {
+    return !!SPEECH && state.settings.readAloud;
+  }
+
+  /**
+   * Starts showing pieces from the current one, and reading them aloud if
+   * that is on: when playback starts, moves, or changes its speed or
+   * whether it reads aloud.
+   * @param {!Reader} reader
+   */
+  function startPlayback(reader) {
+    clearTimer(reader);
+    stopSpeech(reader);
+    if (readsAloud()) {
+      // The voice sets the pace from the start.
+      reader.rampStep = CONFIG.rampUp.pieces;
+      speak(reader);
+      return;
+    }
+    reader.rampStep = 0;
+    reader.nextDue = performance.now() + currentDuration(reader);
+    schedule(reader);
+  }
+
+  /**
+   * Reads the current sentence aloud, from the current word on.
+   * @param {!Reader} reader
+   */
+  function speak(reader) {
+    const synth = SPEECH;
+    const piece = reader.text.pieces[reader.index];
+    if (!synth || !piece) return;
+    const {words, sentences} = reader.text;
+    const start = piece.word;
+    const end = sentences[words[start].sentence].end;
+    const {text, offsets} = speechText(words, start, end);
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = speechRate(state.settings.wpm);
+    if (reader.lang) utterance.lang = reader.lang;
+    const voice = speechVoice(synth.getVoices(), reader.lang);
+    if (voice) utterance.voice = voice;
+    /** @type {!Speech} */
+    const speech = {utterance, start, end, offsets, boundaries: false};
+    reader.speech = speech;
+    // Events of an utterance that was stopped may still come.
+    const current = () => reader.speech === speech && reader.playing;
+    utterance.addEventListener('start', () => {
+      if (!current()) return;
+      if (reader.speechFailed) {
+        reader.speechFailed = false;
+        renderReadAloud(reader);
+      }
+      reader.nextDue = performance.now() + currentDuration(reader);
+      schedule(reader);
+    });
+    utterance.addEventListener('boundary', (event) => {
+      if (current() && event.name === 'word') {
+        onSpeechBoundary(reader, speech, event.charIndex);
+      }
+    });
+    utterance.addEventListener('end', () => {
+      if (current()) onSpeechEnd(reader, speech);
+    });
+    utterance.addEventListener('error', () => {
+      if (current()) onSpeechError(reader);
+    });
+    synth.speak(utterance);
+  }
+
+  /**
+   * Stops reading aloud.
+   * @param {!Reader} reader
+   */
+  function stopSpeech(reader) {
+    if (!reader.speech) return;
+    reader.speech = null;
+    SPEECH?.cancel();
+  }
+
+  /**
+   * Shows the word that the voice has come to; the timer shows its further
+   * pieces.
+   * @param {!Reader} reader
+   * @param {!Speech} speech
+   * @param {number} charIndex Of the word boundary event.
+   */
+  function onSpeechBoundary(reader, speech, charIndex) {
+    speech.boundaries = true;
+    const word = speech.start + wordAtChar(speech.offsets, charIndex);
+    if (reader.text.pieces[reader.index].word === word) return;
+    reader.index = reader.text.words[word].piece;
+    reader.nextDue = performance.now() + currentDuration(reader);
+    renderWord(reader);
+    renderProgress(reader);
+    schedule(reader);
+  }
+
+  /**
+   * Goes on with the next sentence when the voice has finished one, or
+   * stops at the end of the text.
+   * @param {!Reader} reader
+   * @param {!Speech} speech
+   */
+  function onSpeechEnd(reader, speech) {
+    reader.speech = null;
+    clearTimer(reader);
+    const {words, pieces} = reader.text;
+    reader.index = speech.end < words.length ?
+        words[speech.end].piece :
+        pieces.length - 1;
+    renderWord(reader);
+    if (speech.end < words.length) {
+      renderProgress(reader);
+      speak(reader);
+    } else {
+      finish(reader);
+    }
+  }
+
+  /**
+   * Goes on without the voice when it fails (if there is none for the
+   * language, for example) and says so at the Read aloud switch. The next
+   * start, move or change of the speed tries the voice again.
+   * @param {!Reader} reader
+   */
+  function onSpeechError(reader) {
+    reader.speech = null;
+    reader.speechFailed = true;
+    renderReadAloud(reader);
+    reader.nextDue = performance.now() + currentDuration(reader);
     schedule(reader);
   }
 
@@ -1939,10 +2287,8 @@
     }
     reader.resumeRewind = false;
     reader.playing = true;
-    reader.rampStep = 0;
-    reader.nextDue = performance.now() + currentDuration(reader);
     renderPosition(reader);
-    schedule(reader);
+    startPlayback(reader);
   }
 
   /**
@@ -1953,6 +2299,7 @@
     if (reader.playing) reader.resumeRewind = true;
     reader.playing = false;
     clearTimer(reader);
+    stopSpeech(reader);
     renderPlayState(reader);
     savePosition(reader);
   }
@@ -1976,11 +2323,7 @@
     reader.index = index;
     reader.finished = false;
     reader.resumeRewind = false;
-    if (reader.playing) {
-      reader.rampStep = 0;
-      reader.nextDue = performance.now() + currentDuration(reader);
-      schedule(reader);
-    }
+    if (reader.playing) startPlayback(reader);
     renderPosition(reader);
   }
 
@@ -1996,7 +2339,8 @@
 
   /**
    * Changes a setting and shows its effect. While a slider is dragged, the
-   * setting is only stored when it is released.
+   * setting is only stored when it is released. A new speed applies to the
+   * voice once it is stored: the voice starts the current word again.
    * @param {!Reader} reader
    * @param {!SettingName} name
    * @param {*} value
@@ -2006,6 +2350,21 @@
     state.settings = {...state.settings, [name]: sanitizeSetting(name, value)};
     if (store) GM_setValue(CONFIG.storageSettings, state.settings);
     renderSettings(reader);
+    if (name === 'wpm' && store && reader.speech) startPlayback(reader);
+  }
+
+  /**
+   * Turns reading aloud on or off; playback goes on with or without the
+   * voice.
+   * @param {!Reader} reader
+   * @param {boolean} readAloud
+   */
+  function changeReadAloud(reader, readAloud) {
+    state.settings = {...state.settings, readAloud};
+    GM_setValue(CONFIG.storageSettings, state.settings);
+    reader.speechFailed = false;
+    renderSettings(reader);
+    if (reader.playing) startPlayback(reader);
   }
 
   // ===========================================================================
@@ -2082,6 +2441,7 @@
       return element.dataset['word'] === undefined ? 'button' : 'word';
     }
     if (element instanceof HTMLInputElement) {
+      if (element.type === 'checkbox') return 'button';
       return element.type === 'range' ? 'range' : 'text';
     }
     if (element instanceof HTMLTextAreaElement ||
@@ -2234,6 +2594,8 @@
       changeSetting(reader, 'skip', ui.skip.value);
       ui.skip.value = String(state.settings.skip);
     });
+    ui.readAloud.addEventListener('change',
+        () => changeReadAloud(reader, ui.readAloud.checked));
     // Escape (and the back gesture on Android) asks the dialog to close.
     dialog.addEventListener('cancel', (event) => {
       event.preventDefault();
@@ -2350,6 +2712,7 @@
       text: {words: [], pieces: [], sentences: []},
       key: '\u0000',
       source: 'page',
+      lang: '',
       page: '',
       hash: '',
       savedWord: 0,
@@ -2362,6 +2725,8 @@
       rampStep: 0,
       timer: 0,
       nextDue: 0,
+      speech: null,
+      speechFailed: false,
       darkQuery: window.matchMedia('(prefers-color-scheme: dark)'),
       viewport: null,
       rootStyles: [],
@@ -2460,6 +2825,7 @@
     const key = content.paragraphs.map((paragraph) => paragraph.text)
         .join('\n');
     reader.ui.heading.textContent = content.title;
+    reader.lang = content.lang;
     // Stops playback and stores the position in the previous text.
     pause(reader);
     if (key === reader.key) {
@@ -2519,9 +2885,14 @@
   GM_addValueChangeListener(CONFIG.storageSettings,
       (name, oldValue, value, remote) => {
         if (!remote) return;
+        const {readAloud} = state.settings;
         state.settings = sanitizeSettings(value);
         const reader = state.reader;
-        if (reader && reader.dialog.isConnected) renderSettings(reader);
+        if (!reader || !reader.dialog.isConnected) return;
+        renderSettings(reader);
+        if (reader.playing && state.settings.readAloud !== readAloud) {
+          startPlayback(reader);
+        }
       });
 
   // While the reader is open, the page is inert: nothing new can be

@@ -62,11 +62,14 @@ after(async () => {
  * @param {string} name File name in tests/fixtures/.
  * @param {(page: !import('playwright').Page) => !Promise<void>} test
  * @param {!Object=} preset Stored values (GM_getValue) before the page loads.
- * @param {{incognito: (boolean|undefined)}=} options incognito makes
- *     GM_info report a private window.
+ * @param {{incognito: (boolean|undefined),
+ *     speech: (!SpeechOptions|undefined)}=} options incognito makes
+ *     GM_info report a private window; speech replaces the browser's speech
+ *     synthesis (see fakeSpeech).
  * @return {!Promise<void>}
  */
-async function withPage(name, test, preset = {}, {incognito = false} = {}) {
+async function withPage(name, test, preset = {},
+    {incognito = false, speech = undefined} = {}) {
   const context = await browser.newContext({
     viewport: {width: 1000, height: 700},
     reducedMotion: 'reduce',
@@ -78,12 +81,89 @@ async function withPage(name, test, preset = {}, {incognito = false} = {}) {
       window.reader = (selector) => document.querySelector('speed-reader')
           ?.shadowRoot?.querySelector(selector) ?? null;
     }, {values: preset, incognito});
+    if (speech) await context.addInitScript(fakeSpeech, speech);
     const page = await context.newPage();
     await page.goto(`${baseUrl}/tests/fixtures/${name}`);
     await test(page);
   } finally {
     await context.close();
   }
+}
+
+/**
+ * How the fake speech synthesis behaves: available false removes speech
+ * synthesis from the page, fail makes every utterance fail, and wordMs is
+ * the time the voice takes for a word.
+ * @typedef {{available: (boolean|undefined), fail: (boolean|undefined),
+ *     wordMs: (number|undefined)}} SpeechOptions
+ */
+
+/**
+ * Runs in the page before the script: replaces the browser's speech
+ * synthesis, so that the tests depend neither on installed voices nor on
+ * their timing, and make no sound. An utterance starts at once, sends a
+ * word boundary event for each word in turn and ends after its last word.
+ * The page records the utterances in window.spoken and counts the calls of
+ * cancel() in window.speechCancels.
+ * @param {!SpeechOptions} options
+ */
+function fakeSpeech({available = true, fail = false, wordMs = 50}) {
+  if (!available) {
+    Object.defineProperty(window, 'speechSynthesis',
+        {configurable: true, value: undefined});
+    return;
+  }
+  window.spoken = [];
+  window.speechCancels = 0;
+  /** @type {!Array<number>} */
+  let timers = [];
+  const fire = (utterance, type, details = {}) =>
+    utterance.dispatchEvent(Object.assign(new Event(type), details));
+  const later = (callback, ms) => timers.push(setTimeout(callback, ms));
+  class Utterance extends EventTarget {
+    /** @param {string} text */
+    constructor(text) {
+      super();
+      this.text = text;
+      this.rate = 1;
+      this.lang = '';
+      this.voice = null;
+    }
+  }
+  const synthesis = {
+    getVoices: () => [
+      {name: 'German', lang: 'de-DE', default: true},
+      {name: 'English', lang: 'en-US', default: false},
+    ],
+    speak(utterance) {
+      window.spoken.push({
+        text: utterance.text,
+        rate: utterance.rate,
+        lang: utterance.lang,
+        voice: utterance.voice?.name ?? null,
+      });
+      if (fail) {
+        later(() => fire(utterance, 'error', {error: 'synthesis-failed'}), 0);
+        return;
+      }
+      later(() => fire(utterance, 'start'), 0);
+      let ms = 0;
+      for (const match of utterance.text.matchAll(/\S+/g)) {
+        later(() => fire(utterance, 'boundary',
+            {name: 'word', charIndex: match.index}), ms);
+        ms += wordMs;
+      }
+      later(() => fire(utterance, 'end'), ms);
+    },
+    cancel() {
+      window.speechCancels++;
+      timers.forEach(clearTimeout);
+      timers = [];
+    },
+  };
+  Object.defineProperty(window, 'speechSynthesis',
+      {configurable: true, value: synthesis});
+  window.SpeechSynthesisUtterance = Utterance;
 }
 
 /**
@@ -616,6 +696,129 @@ describe('controls', () => {
   });
 });
 
+describe('reading aloud', () => {
+  /**
+   * @param {!import('playwright').Page} page
+   * @return {!Promise<!Array<string>>} The recorded words (startRecording).
+   */
+  const recordedWords = (page) => page.evaluate(() => window.recorded.map(
+      (entry) => entry.replace(/^Word \d+ of \d+: /, '')));
+
+  it('reads each sentence aloud and shows the word being read', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      assert.equal(await page.isChecked('.sr-read-aloud'), true);
+      assert.equal(await page.textContent('.sr-read-aloud-label'),
+          'Read aloud');
+      await startRecording(page);
+      await page.click('.sr-play');
+      await page.waitForFunction(() => window.spoken.length >= 3);
+      await page.click('.sr-play');
+      const spoken = await page.evaluate(() => window.spoken);
+      // The page's language picks the voice; the speed sets the rate.
+      const voice = {rate: 300 / 180, lang: 'en', voice: 'English'};
+      assert.deepEqual(spoken.slice(0, 3), [
+        {text: 'Steam on the Danube', ...voice},
+        {text: ARTICLE_TEXT.split(' ').slice(4, 19).join(' '), ...voice},
+        {text: ARTICLE_TEXT.split(' ').slice(19, 31).join(' '), ...voice},
+      ]);
+      // Up to the first word of the third sentence.
+      assert.deepEqual((await recordedWords(page)).slice(0, 20),
+          ARTICLE_TEXT.split(' ').slice(0, 20));
+    }, {settings: {readAloud: true}}, {speech: {}});
+  });
+
+  it('stops the voice when paused, moved or turned off', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.click('.sr-play');
+      await page.waitForFunction(() => window.spoken.length === 2);
+      await page.click('.sr-play');
+      assert.equal(await page.evaluate(() => window.speechCancels), 1);
+      const paused = (await readerState(page)).index;
+      await delay(300);
+      assert.equal((await readerState(page)).index, paused);
+
+      // Resumed at the start of the sentence, and moved: the voice starts
+      // again where the reader is.
+      await page.click('.sr-play');
+      await page.click('.sr-forward');
+      let spoken = await page.evaluate(() => window.spoken);
+      assert.equal(spoken.length, 4);
+      assert.equal(spoken[2].text, spoken[1].text);
+      // Ten words on from the first or second word of the sentence, to its
+      // end (word 19).
+      const rest = spoken[3].text.split(' ');
+      assert.ok(rest.length === 4 || rest.length === 5, spoken[3].text);
+      assert.deepEqual(rest,
+          ARTICLE_TEXT.split(' ').slice(19 - rest.length, 19));
+      assert.equal(await page.evaluate(() => window.speechCancels), 2);
+
+      // A new speed applies to the voice at once.
+      await page.keyboard.press('ArrowDown');
+      spoken = await page.evaluate(() => window.spoken);
+      assert.equal(spoken.length, 5);
+      assert.equal(spoken[4].rate, 975 / 180);
+
+      // Turned off, playback goes on without the voice.
+      await page.click('.sr-read-aloud');
+      assert.equal((await storedSettings(page)).readAloud, false);
+      const index = (await readerState(page)).index;
+      await page.waitForFunction((start) =>
+        Number(/Word (\d+)/.exec(reader('.sr-position').textContent)[1]) >
+            start + 3, index);
+      assert.equal((await readerState(page)).playing, true);
+      assert.equal(await page.evaluate(() => window.spoken.length), 5);
+      assert.equal(await page.evaluate(() => window.speechCancels), 4);
+      await page.click('.sr-play');
+    }, {settings: {wpm: 1000, readAloud: true}}, {speech: {wordMs: 500}});
+  });
+
+  it('goes on without a voice that fails', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.click('.sr-play');
+      await page.waitForFunction(() =>
+        reader('.sr-read-aloud-label').textContent === 'Read aloud (no voice)');
+      await page.waitForFunction(() => /Word ([3-9]|\d\d+) of/.test(
+          reader('.sr-position').textContent));
+      assert.equal((await readerState(page)).playing, true);
+      await page.click('.sr-play');
+      // Turned off, the switch no longer reports the failure.
+      await page.click('.sr-read-aloud');
+      assert.equal(await page.textContent('.sr-read-aloud-label'),
+          'Read aloud');
+    }, {settings: {wpm: 1000, readAloud: true}}, {speech: {fail: true}});
+  });
+
+  it('is turned on with the switch, which keeps Space', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      assert.equal(await page.isChecked('.sr-read-aloud'), false);
+      await page.focus('.sr-read-aloud');
+      await page.keyboard.press('Space');
+      assert.equal(await page.isChecked('.sr-read-aloud'), true);
+      assert.equal((await readerState(page)).playing, false);
+      assert.equal((await storedSettings(page)).readAloud, true);
+      // Arrow keys still skip.
+      await page.keyboard.press('ArrowRight');
+      assert.equal((await readerState(page)).index, 11);
+    }, {}, {speech: {}});
+  });
+
+  it('is not offered without speech synthesis', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      assert.equal(await page.isVisible('.sr-read-aloud'), false);
+      // A stored setting does not keep playback from running.
+      await page.click('.sr-play');
+      await page.waitForFunction(() => /Word ([3-9]|\d\d+) of/.test(
+          reader('.sr-position').textContent));
+      await page.click('.sr-play');
+    }, {settings: {wpm: 1000, readAloud: true}}, {speech: {available: false}});
+  });
+});
+
 describe('settings', () => {
   it('apply at once and are stored', async () => {
     await withPage('speed-reader.html', async (page) => {
@@ -631,7 +834,7 @@ describe('settings', () => {
       await page.click('.sr-forward');
       assert.equal((await readerState(page)).index, 4);
       assert.deepEqual(await storedSettings(page),
-          {wpm: 600, fontSize: 72, skip: 3});
+          {wpm: 600, fontSize: 72, skip: 3, readAloud: false});
 
       await page.keyboard.press('Escape');
       await openReader(page);
