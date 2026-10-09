@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reading Ruler
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.3.3
+// @version      1.4.0
 // @description  Highlights one line of an article at a time: click or tap a line, then move with the arrow keys
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -127,6 +127,10 @@
     // Space around the highlighted line in CSS pixels. The vertical padding
     // is a share of the line height within limits.
     padding: {x: 6, yShare: 0.2, yMin: 2, yMax: 8},
+    // A line that ends at least this far (px) before an edge of its column
+    // may have a floating element (image, infobox) beside it; the highlight
+    // ends before one.
+    minFloatGap: 24,
     // Minimum time between two detections of the content root in ms, while
     // the page keeps changing its DOM.
     redetectInterval: 1000,
@@ -381,17 +385,29 @@
 
   /**
    * Computes the highlight: as wide as the text column, as high as the line,
-   * plus padding.
+   * plus padding. It ends before floating elements beside the line (an
+   * image, an infobox), which shorten the line but not its column.
    * @param {!Box} line
    * @param {?Span} column
+   * @param {!Array<!Box>=} obstacles Floating elements in the column.
    * @return {!Placement} In the coordinates of the input.
    */
-  function overlayBox(line, column) {
+  function overlayBox(line, column, obstacles = []) {
     const padY = paddingY(line);
-    const left = Math.min(column ? column.left : line.left, line.left) -
+    let left = Math.min(column ? column.left : line.left, line.left) -
         CONFIG.padding.x;
-    const right = Math.max(column ? column.right : line.right, line.right) +
+    let right = Math.max(column ? column.right : line.right, line.right) +
         CONFIG.padding.x;
+    for (const obstacle of obstacles) {
+      if (verticalOverlap(obstacle, line) <= 0) continue;
+      if (obstacle.left >= line.right) {
+        right = Math.min(right,
+            Math.max(obstacle.left, line.right + CONFIG.padding.x));
+      } else if (obstacle.right <= line.left) {
+        left = Math.max(left,
+            Math.min(obstacle.right, line.left - CONFIG.padding.x));
+      }
+    }
     return {
       top: line.top - padY,
       left,
@@ -1336,13 +1352,53 @@
   }
 
   /**
+   * Floating elements (images, infoboxes) beside a line that ends well
+   * before an edge of its column: probes the column's edges at the height
+   * of the line. A line that is short by itself (ragged text) finds the
+   * block's own background there.
+   * @param {!Box} line
+   * @param {!Span} column
+   * @param {!Element} block
+   * @return {!Array<!Box>}
+   */
+  function floatsBeside(line, column, block) {
+    /** @type {!Array<!Box>} */
+    const floats = [];
+    const y = (line.top + line.bottom) / 2;
+    const edges = [
+      {x: column.right - 2, free: column.right - line.right},
+      {x: column.left + 2, free: line.left - column.left},
+    ];
+    for (const {x, free} of edges) {
+      if (free < CONFIG.minFloatGap) continue;
+      const hit = document.elementFromPoint(x, y);
+      if (!hit || block.contains(hit) || hit.contains(block)) continue;
+      for (let element = /** @type {?Element} */ (hit);
+        element && element !== document.body;
+        element = element.parentElement) {
+        if (element.contains(block)) break;
+        if (styleOf(element).float !== 'none') {
+          const rect = element.getBoundingClientRect();
+          floats.push({top: rect.top, bottom: rect.bottom, left: rect.left,
+            right: rect.right});
+          break;
+        }
+      }
+    }
+    return floats;
+  }
+
+  /**
    * Moves the highlight over a line.
    * @param {!LineRef} ref
    * @param {boolean} animate Slide from the previous line.
    */
   function render(ref, animate) {
     const {host, ruler, controls} = ensureUi();
-    const box = overlayBox(ref.layout.lines[ref.index], columnOf(ref));
+    const line = ref.layout.lines[ref.index];
+    const column = columnOf(ref);
+    const box = overlayBox(line, column,
+        floatsBeside(line, column, ref.segment.block));
     const origin = host.getBoundingClientRect();
     /** @type {!Placement} */
     const next = {

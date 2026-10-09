@@ -373,6 +373,33 @@ describe('pickColumnIndex and overlayBox', () => {
     });
   });
 
+  it('ends before a floating element beside the line', () => {
+    const {x} = core.config.padding;
+    const column = {left: 20, right: 620};
+    // An infobox on the right, from 450 to 620.
+    const right = core.overlayBox(rect(100, 120, 20, 420), column,
+        [rect(0, 400, 450, 620)]);
+    assert.equal(right.left, 20 - x);
+    assert.equal(right.left + right.width, 450);
+    // An image on the left, from 20 to 200.
+    const left = core.overlayBox(rect(100, 120, 230, 600), column,
+        [rect(90, 300, 20, 200)]);
+    assert.equal(left.left, 200);
+    assert.equal(left.left + left.width, 620 + x);
+  });
+
+  it('ignores floating elements above or below the line', () => {
+    const box = core.overlayBox(rect(100, 120, 20, 420),
+        {left: 20, right: 620}, [rect(0, 90, 450, 620)]);
+    assert.equal(box.left + box.width, 620 + core.config.padding.x);
+  });
+
+  it('keeps the padding of the line next to a close float', () => {
+    const box = core.overlayBox(rect(100, 120, 20, 448),
+        {left: 20, right: 620}, [rect(0, 400, 450, 620)]);
+    assert.equal(box.left + box.width, 448 + core.config.padding.x);
+  });
+
   it('limits the vertical padding', () => {
     const {yMin, yMax} = core.config.padding;
     assert.equal(core.overlayBox(rect(0, 5, 0, 10), null).top, -yMin);

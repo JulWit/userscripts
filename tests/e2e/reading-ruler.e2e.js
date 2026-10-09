@@ -126,6 +126,25 @@ describe('article page', () => {
         assert.ok(covers(await ruler(page), word));
       }));
 
+  it('ends before a floating box beside the line', () => withPage(
+      'float.html', async (page) => {
+        const boxLeft = await page.evaluate(() =>
+          document.querySelector('#box').getBoundingClientRect().left +
+              scrollX);
+        const columnRight = await page.evaluate(() =>
+          document.querySelector('article').getBoundingClientRect().right +
+              scrollX);
+        const beside = await clickWord(page, '#beside', 'Alpha');
+        let box = await ruler(page);
+        assert.ok(covers(box, beside));
+        assert.ok(box.right <= boxLeft + 0.5, `${box.right} > ${boxLeft}`);
+        // Below the box, the highlight spans the column again.
+        const below = await clickWord(page, '#below', 'Omega');
+        box = await ruler(page);
+        assert.ok(covers(box, below));
+        assert.ok(box.right > columnRight, `${box.right} <= ${columnRight}`);
+      }));
+
   it('moves down and back up to the same line', () => withPage(
       'article.html', async (page) => {
         // Every line of #indented starts after collapsed source indentation.

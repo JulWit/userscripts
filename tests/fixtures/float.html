@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: floating box</title>
+<style>
+  body {
+    font: 16px/1.5 Georgia, serif;
+    margin: 0;
+  }
+
+  article {
+    margin: 20px;
+    width: 600px;
+  }
+
+  #box {
+    background: #ddd;
+    float: right;
+    height: 120px;
+    margin: 0 0 8px 24px;
+    width: 200px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <article>
+    <h1>Floating boxes</h1>
+    <figure id="box"><figcaption>A box beside the text</figcaption></figure>
+    <p id="beside">Alpha lines run beside the floating box, which takes the
+      right part of the column, so that each of these lines ends well before
+      the edge of the paragraph. The highlight of such a line must end before
+      the box instead of covering it, while the text goes on and on around the
+      box, line after line, with enough words to fill several lines next to it
+      and a few more below it, where the lines get as wide as the column.</p>
+    <p id="below">Omega lines run below the box, across the whole column, as
+      wide as the paragraph itself, so that their highlight spans the column
+      from one edge to the other, as it does on pages without any floats, and
+      this paragraph is long enough to wrap onto a few lines of its own.</p>
+  </article>
+</main>
+<script src="harness.js"></script>
+<script src="../../lib/content-detection.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+</body>
+</html>
