@@ -62,19 +62,22 @@ after(async () => {
  * @param {string} name File name in tests/fixtures/.
  * @param {(page: !import('playwright').Page) => !Promise<void>} test
  * @param {!Object=} preset Stored values (GM_getValue) before the page loads.
+ * @param {{incognito: (boolean|undefined)}=} options incognito makes
+ *     GM_info report a private window.
  * @return {!Promise<void>}
  */
-async function withPage(name, test, preset = {}) {
+async function withPage(name, test, preset = {}, {incognito = false} = {}) {
   const context = await browser.newContext({
     viewport: {width: 1000, height: 700},
     reducedMotion: 'reduce',
   });
   try {
-    await context.addInitScript((values) => {
+    await context.addInitScript(({values, incognito}) => {
       window.harnessPreset = values;
+      window.harnessIncognito = incognito;
       window.reader = (selector) => document.querySelector('speed-reader')
           ?.shadowRoot?.querySelector(selector) ?? null;
-    }, preset);
+    }, {values: preset, incognito});
     const page = await context.newPage();
     await page.goto(`${baseUrl}/tests/fixtures/${name}`);
     await test(page);
@@ -480,6 +483,34 @@ describe('controls', () => {
     }, {settings: {skip: 3}});
   });
 
+  it('reaches the words of the sentence with the keyboard', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      const focused = () => page.evaluate(() => {
+        const active = reader('.sr-panel').getRootNode().activeElement;
+        return active ? `${active.className}: ${active.textContent}` : '';
+      });
+      // The sentence is one stop in the tab order, at the current word.
+      for (let index = 0; index < 10; index++) {
+        if ((await focused()).startsWith('sr-mark')) break;
+        await page.keyboard.press('Tab');
+      }
+      assert.equal(await focused(), 'sr-mark: Steam');
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('ArrowRight');
+      assert.equal(await focused(), 'sr-context-word: the');
+      assert.equal((await readerState(page)).index, 1);
+      await page.keyboard.press('Enter');
+      assert.equal((await readerState(page)).index, 3);
+      assert.equal(await focused(), 'sr-mark: the');
+      await page.keyboard.press('End');
+      await page.keyboard.press('Space');
+      const state = await readerState(page);
+      assert.equal(state.index, 4);
+      assert.equal(state.playing, false);
+    });
+  });
+
   it('goes to a word clicked in the sentence', async () => {
     await withPage('speed-reader.html', async (page) => {
       await openReader(page);
@@ -590,7 +621,15 @@ describe('overlay', () => {
       // The same text keeps its place.
       assert.equal((await readerState(page)).index, 11);
 
+      // A second call while it is open keeps the text: the page is inert,
+      // so nothing new can be selected.
+      await page.evaluate((caption) => harnessRunMenuCommand(caption), MENU);
+      assert.equal((await readerState(page)).total,
+          ARTICLE_TEXT.split(' ').length);
+
+      // Closed while playing and opened with a selection, it reads that.
       await page.click('.sr-play');
+      await page.keyboard.press('Escape');
       await page.evaluate(() => {
         const range = document.createRange();
         range.selectNodeContents(document.querySelector('#title'));
@@ -755,6 +794,73 @@ describe('overlay', () => {
       await page.keyboard.press('Escape');
       assert.equal(await page.evaluate(() => GM_getValue('positions')),
           undefined);
+    });
+  });
+
+  it('neither stores nor uses positions in a private window', async () => {
+    const url = `${baseUrl}/tests/fixtures/speed-reader.html`;
+    const stored = [{url, hash: 'any', word: 30}];
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      assert.equal((await readerState(page)).index, 1);
+      await page.click('.sr-forward');
+      await page.keyboard.press('Escape');
+      assert.deepEqual(await page.evaluate(() => GM_getValue('positions')),
+          stored);
+    }, {positions: stored}, {incognito: true});
+  });
+
+  it('forgets the positions on request', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.click('.sr-forward');
+      await page.keyboard.press('Escape');
+      assert.equal((await page.evaluate(() => GM_getValue('positions')))
+          .length, 1);
+      await page.evaluate(() =>
+        harnessRunMenuCommand('Speed Reader: Forget reading positions'));
+      assert.deepEqual(await page.evaluate(() => GM_getValue('positions')),
+          []);
+      // Read on, the position is stored again.
+      await openReader(page);
+      await page.click('.sr-forward');
+      await page.keyboard.press('Escape');
+      assert.equal((await page.evaluate(() => GM_getValue('positions')))
+          .length, 1);
+    });
+  });
+
+  it('hides the page\'s styles for the dialog backdrop', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await page.addStyleTag(
+          {content: '::backdrop { background: rgb(255, 0, 0); }'});
+      await openReader(page);
+      assert.equal(await page.evaluate(() => getComputedStyle(
+          document.querySelector('dialog'), '::backdrop').display), 'none');
+      await page.keyboard.press('Escape');
+      assert.equal(await page.evaluate(() =>
+        document.adoptedStyleSheets.length), 0);
+    });
+  });
+
+  it('keeps the page in place without its scroll bar', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await page.evaluate(() => {
+        document.body.style.minHeight = '3000px';
+      });
+      const hasScrollBar = await page.evaluate(() =>
+        window.innerWidth > document.documentElement.clientWidth);
+      const left = () => page.evaluate(() =>
+        document.querySelector('main').getBoundingClientRect().left);
+      const before = await left();
+      await openReader(page);
+      assert.equal(await left(), before);
+      assert.equal(await page.evaluate(() => document.documentElement.style
+          .getPropertyValue('scrollbar-gutter')),
+      hasScrollBar ? 'stable' : '');
+      await page.keyboard.press('Escape');
+      assert.equal(await page.evaluate(() =>
+        document.documentElement.style.cssText), '');
     });
   });
 

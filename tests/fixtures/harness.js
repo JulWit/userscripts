@@ -100,6 +100,12 @@ function harnessRunMenuCommand(caption) {
   throw new Error(`No menu command "${caption}"`);
 }
 
+/**
+ * Script information. Tests can mark the window as private by defining
+ * window.harnessIncognito (true) in an init script, before the page loads.
+ */
+const GM_info = Object.freeze({isIncognito: window.harnessIncognito === true});
+
 // With ?touch in the URL, the page reports a coarse primary pointer, as on a
 // phone, so that the ruler shows its touch controls in any browser.
 if (new URLSearchParams(location.search).has('touch')) {

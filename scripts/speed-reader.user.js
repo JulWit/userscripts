@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.2.0
+// @version      1.3.0
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -28,14 +28,18 @@
  * highlighted and stays at the same horizontal position. Words are shown
  * longer after punctuation, at the end of paragraphs and after headings;
  * playback starts a little slower and, after a pause, resumes a few words
- * back. The position in a page's text is remembered for the next visit.
- * The script registers a menu command and a key listener and does nothing
+ * back. The position in a page's text is remembered for the next visit,
+ * except in private windows.
+ * The script registers menu commands and a key listener and does nothing
  * else until it is used. The reader is a modal dialog in the top layer with
  * its interface in a closed shadow root, rather than a window of its own,
  * which pop-up blockers would stop: script manager menu commands do not count
  * as user actions in the page. The script runs at document-start, so that
- * its key listener comes before the page's own and keeps keys from the page
- * while the reader is open.
+ * its key listener usually comes before the page's own and keeps keys from
+ * the page while the reader is open. Violentmonkey does not guarantee that
+ * (in Firefox, a page script may run first), so a page that adds a key
+ * listener to the window in the capture phase very early still sees the
+ * keys.
  * The content detection is shared with the Reading Ruler
  * (lib/content-detection.js, loaded with @require).
  * Known limitations: text in iframes and in shadow DOM (web components) is
@@ -106,8 +110,9 @@
    */
 
   /**
-   * Kind of the focused element in the reader, for keyAction.
-   * @typedef {('button'|'range'|'text'|'other')} TargetKind
+   * Kind of the focused element in the reader, for keyAction: 'word' is a
+   * word of the sentence shown while paused.
+   * @typedef {('button'|'word'|'range'|'text'|'other')} TargetKind
    */
 
   /**
@@ -657,8 +662,9 @@
   /**
    * The reader action of a key press. Escape closes the reader. Other keys
    * that the focused control uses itself keep their normal behavior: Space
-   * and Enter press a button, the arrow keys move a slider, and text fields
-   * take every key.
+   * and Enter press a button, the arrow keys move a slider and between the
+   * words of the sentence (see wordFocusTarget), and text fields take every
+   * key.
    * @param {string} key KeyboardEvent.key.
    * @param {!TargetKind} target Kind of the focused element.
    * @param {boolean} modified Whether Ctrl, Alt or Meta is held.
@@ -669,9 +675,38 @@
     if (key === 'Escape') return 'close';
     if (target === 'text') return '';
     const action = KEY_ACTIONS[key] || '';
-    if (target === 'button' && action === 'toggle') return '';
+    if ((target === 'button' || target === 'word') && action === 'toggle') {
+      return '';
+    }
+    if (target === 'word' && (action === 'back' || action === 'forward')) {
+      return '';
+    }
     if (target === 'range' && action && action !== 'toggle') return '';
     return action;
+  }
+
+  /**
+   * The word of the sentence to focus after a key press on one of them: the
+   * words form one stop in the tab order, and the arrow keys, Home and End
+   * move between them.
+   * @param {string} key KeyboardEvent.key.
+   * @param {number} index Index of the focused word in the sentence.
+   * @param {number} count Number of words in the sentence.
+   * @return {number} Index of the word to focus, -1 for another key.
+   */
+  function wordFocusTarget(key, index, count) {
+    switch (key) {
+      case 'ArrowLeft':
+        return Math.max(0, index - 1);
+      case 'ArrowRight':
+        return Math.min(count - 1, index + 1);
+      case 'Home':
+        return 0;
+      case 'End':
+        return count - 1;
+      default:
+        return -1;
+    }
   }
 
   /**
@@ -798,6 +833,7 @@
     sanitizeSetting,
     sanitizeSettings,
     keyAction,
+    wordFocusTarget,
     fitWord,
     hashText,
     withoutHash,
@@ -822,7 +858,7 @@
   // Script managers provide GM_* as local identifiers, not necessarily as
   // window properties.
   /* global GM_getValue, GM_setValue, GM_registerMenuCommand,
-     GM_addValueChangeListener */
+     GM_addValueChangeListener, GM_info */
 
   /**
    * Elements of the reader overlay. themed lists the elements with colors
@@ -854,8 +890,10 @@
    * a little. rampStep counts the pieces shown since playback started.
    * nextDue is the time (performance.now()) at which the next piece is due.
    * viewport is the viewport meta element the open reader added to the
-   * page, overflow the page's inline overflow style it replaced, and focus
-   * the element that had the focus before.
+   * page, rootStyles the page's inline styles of the root element that it
+   * replaced, and focus the element that had the focus before.
+   * backdropSheet hides the dialog's ::backdrop (null if it cannot be
+   * created).
    * @typedef {{dialog: !HTMLDialogElement, host: !HTMLElement,
    *     shadow: !ShadowRoot, ui: !Ui, text: !ReaderText, key: string,
    *     source: ('page'|'selection'), hash: string, savedWord: number,
@@ -863,7 +901,8 @@
    *     playing: boolean, finished: boolean, resumeRewind: boolean,
    *     rampStep: number, timer: number, nextDue: number,
    *     darkQuery: !MediaQueryList, viewport: ?HTMLMetaElement,
-   *     overflow: ?{value: string, priority: string},
+   *     rootStyles: !Array<{name: string, value: string, priority: string}>,
+   *     backdropSheet: ?CSSStyleSheet,
    *     focus: ?HTMLElement}} Reader
    */
 
@@ -1025,6 +1064,12 @@
     .sr-input:focus-visible {
       outline: 2px solid currentColor;
       outline-offset: 2px;
+    }
+
+    .sr-context-word:focus-visible,
+    .sr-mark:focus-visible {
+      outline: 2px solid currentColor;
+      outline-offset: 1px;
     }
 
     .sr-button:not(:disabled):hover {
@@ -1240,8 +1285,6 @@
       'touch-action': 'manipulation',
       'user-select': 'none',
     }, 'sr-stage');
-    stage.title = 'Play or pause (Space). On a touch screen, tap near the ' +
-        'left or right edge to skip back or forward.';
 
     const guide = createElement('div', {
       'border-style': 'solid',
@@ -1307,7 +1350,8 @@
       'position': 'relative',
       'text-align': 'center',
     }, 'sr-context');
-    context.title = 'Click a word to go to it';
+    context.setAttribute('role', 'group');
+    context.setAttribute('aria-label', 'Current sentence');
     theme(context, {'color': 'muted'});
 
     const track = createElement('div', {
@@ -1579,9 +1623,14 @@
   function renderContext(reader) {
     const {ui, text} = reader;
     const piece = text.pieces[reader.index];
-    ui.context.style.setProperty('visibility',
-        reader.playing || !piece ? 'hidden' : 'visible');
-    if (reader.playing || !piece) return;
+    const focused = ui.context.contains(reader.shadow.activeElement);
+    const hidden = reader.playing || !piece;
+    ui.context.style.setProperty('visibility', hidden ? 'hidden' : 'visible');
+    if (hidden) {
+      // A hidden word cannot keep the focus.
+      if (focused) ui.panel.focus({preventScroll: true});
+      return;
+    }
     const sentence = text.sentences[text.words[piece.word].sentence];
     /** @type {!Array<!Node|string>} */
     const nodes = [];
@@ -1589,24 +1638,54 @@
     let mark = null;
     for (let index = sentence.start; index < sentence.end; index++) {
       const current = index === piece.word;
-      const element = current ?
-          createElement('mark', {
-            'background': 'transparent',
-            'color': colorsOf(reader).mark,
-            'font-weight': '600',
-          }, 'sr-mark') :
-          createElement('span', {'cursor': 'pointer'}, 'sr-context-word');
-      element.dataset['word'] = String(index);
-      element.textContent = text.words[index].text;
-      if (current) mark = element;
+      // Buttons that look like the words of the sentence. Only the current
+      // word is in the tab order; the arrow keys move between them.
+      const button = createElement('button', {
+        'background': 'transparent',
+        'border': '0',
+        'border-radius': '3px',
+        'color': current ? colorsOf(reader).mark : 'inherit',
+        'cursor': 'pointer',
+        'display': 'inline',
+        'font': 'inherit',
+        'font-weight': current ? '600' : 'inherit',
+        'margin': '0',
+        'padding': '0',
+      }, current ? 'sr-mark' : 'sr-context-word');
+      button.setAttribute('type', 'button');
+      button.tabIndex = current ? 0 : -1;
+      if (current) button.setAttribute('aria-current', 'true');
+      button.dataset['word'] = String(index);
+      button.textContent = text.words[index].text;
+      if (current) mark = button;
       if (nodes.length) nodes.push(' ');
-      nodes.push(element);
+      nodes.push(button);
     }
     ui.context.replaceChildren(...nodes);
     if (mark) {
       ui.context.scrollTop = Math.max(0, mark.offsetTop -
           (ui.context.clientHeight - mark.offsetHeight) / 2);
+      // The focus stays in the sentence when it is drawn again.
+      if (focused) mark.focus({preventScroll: true});
     }
+  }
+
+  /**
+   * Moves the focus between the words of the sentence (wordFocusTarget).
+   * @param {!Reader} reader
+   * @param {!HTMLElement} word The focused word.
+   * @param {string} key
+   * @return {boolean} Whether the key moved the focus.
+   */
+  function moveWordFocus(reader, word, key) {
+    const words = [...reader.ui.context.querySelectorAll('[data-word]')];
+    const target = words[wordFocusTarget(key, words.indexOf(word),
+        words.length)];
+    if (!(target instanceof HTMLElement)) return false;
+    word.tabIndex = -1;
+    target.tabIndex = 0;
+    target.focus();
+    return true;
   }
 
   /**
@@ -1850,19 +1929,26 @@
   // Remembered positions
   // ===========================================================================
 
+  // The script manager's storage outlives private windows, so pages read in
+  // one leave no trace there.
+  const REMEMBERS_POSITIONS = GM_info.isIncognito !== true;
+
   /** @return {!Array<!Position>} */
   function loadPositions() {
-    return sanitizePositions(GM_getValue(CONFIG.storagePositions, []));
+    return REMEMBERS_POSITIONS ?
+        sanitizePositions(GM_getValue(CONFIG.storagePositions, [])) :
+        [];
   }
 
   /**
    * Stores the position in the text of the page, or forgets it at the start
-   * and the end of the text. Selected text has no stored position.
+   * and the end of the text. Selected text has no stored position, and
+   * nothing is stored in a private window.
    * @param {!Reader} reader
    */
   function savePosition(reader) {
     const piece = reader.text.pieces[reader.index];
-    if (reader.source !== 'page' || !piece) return;
+    if (!REMEMBERS_POSITIONS || reader.source !== 'page' || !piece) return;
     const word = reader.finished ? 0 : piece.word;
     if (word === reader.savedWord) return;
     reader.savedWord = word;
@@ -1871,6 +1957,13 @@
     GM_setValue(CONFIG.storagePositions, word ?
         withPosition(positions, {url, hash: reader.hash, word}) :
         withoutPosition(positions, url));
+  }
+
+  /** Forgets the positions of all pages (menu command). */
+  function forgetPositions() {
+    GM_setValue(CONFIG.storagePositions, []);
+    // Reading on stores the position in this page again.
+    if (state.reader) state.reader.savedWord = 0;
   }
 
   // ===========================================================================
@@ -1882,7 +1975,9 @@
    * @return {!TargetKind} Kind of a focused element for keyAction.
    */
   function targetKind(element) {
-    if (element instanceof HTMLButtonElement) return 'button';
+    if (element instanceof HTMLButtonElement) {
+      return element.dataset['word'] === undefined ? 'button' : 'word';
+    }
     if (element instanceof HTMLInputElement) {
       return element.type === 'range' ? 'range' : 'text';
     }
@@ -1899,8 +1994,15 @@
    * @param {!KeyboardEvent} event
    */
   function onReaderKey(reader, event) {
-    const action = keyAction(event.key, targetKind(reader.shadow.activeElement),
-        event.ctrlKey || event.altKey || event.metaKey);
+    const focused = reader.shadow.activeElement;
+    const kind = targetKind(focused);
+    const modified = event.ctrlKey || event.altKey || event.metaKey;
+    if (kind === 'word' && !modified && focused instanceof HTMLElement &&
+        moveWordFocus(reader, focused, event.key)) {
+      event.preventDefault();
+      return;
+    }
+    const action = keyAction(event.key, kind, modified);
     if (!action) return;
     event.preventDefault();
     if (action === 'close') {
@@ -1910,16 +2012,19 @@
     } else if (action === 'back' || action === 'forward') {
       skipWords(reader, action === 'back' ? -1 : 1);
     } else {
-      changeSetting(reader, 'wpm', state.settings.wpm +
+      const wpm = sanitizeSetting('wpm', state.settings.wpm +
           (action === 'faster' ? 1 : -1) * CONFIG.wpmKeyStep);
+      // A held key at the end of the range stores nothing.
+      if (wpm !== state.settings.wpm) changeSetting(reader, 'wpm', wpm);
     }
   }
 
   /**
    * Key listener on the window in the capture phase, added at
-   * document-start before the page's own: while the reader is open, it
-   * handles the keys and keeps every key event from the page. Default
-   * actions (typing, moving a slider, pressing a button) still happen.
+   * document-start, usually before the page's own (see the file overview):
+   * while the reader is open, it handles the keys and keeps every key event
+   * from the page's later listeners. Default actions (typing, moving a
+   * slider, pressing a button) still happen.
    * @param {!KeyboardEvent} event
    */
   function onWindowKey(event) {
@@ -1972,6 +2077,13 @@
       const word = reader.text.words[Number(
           target instanceof HTMLElement ? target.dataset['word'] : NaN)];
       if (word) moveTo(reader, word.piece);
+    });
+    // Like the buttons: a click on a word keeps the focus where it is.
+    ui.context.addEventListener('mousedown', (event) => {
+      if (event.target instanceof Element &&
+          event.target.closest('[data-word]')) {
+        event.preventDefault();
+      }
     });
     // A click beside the panel closes the reader. A press that starts on
     // the panel (dragging a slider out of it) does not.
@@ -2036,6 +2148,43 @@
   // ===========================================================================
 
   /**
+   * Creates the style sheet that hides the ::backdrop of the reader's
+   * dialog: the page's style sheets may style it (a blur, a color), and the
+   * reader draws its own backdrop. Only a style sheet in the page reaches
+   * the pseudo-element.
+   * @return {?CSSStyleSheet} null if constructed style sheets fail.
+   */
+  function createBackdropSheet() {
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(
+          'dialog[data-speed-reader]::backdrop { display: none !important; }');
+      return sheet;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Adds the backdrop style sheet to the page or removes it. Where it
+   * cannot be adopted (a Firefox content script), the page's styles for
+   * ::backdrop stay in effect: they only change the looks.
+   * @param {!Reader} reader
+   * @param {boolean} adopted
+   */
+  function adoptBackdropSheet(reader, adopted) {
+    const sheet = reader.backdropSheet;
+    if (!sheet) return;
+    try {
+      const others =
+          document.adoptedStyleSheets.filter((entry) => entry !== sheet);
+      document.adoptedStyleSheets = adopted ? [...others, sheet] : others;
+    } catch {
+      // The page keeps its own style sheets.
+    }
+  }
+
+  /**
    * Creates the reader, closed: a dialog that holds the shadow host. Inline
    * styles with priority win over the page's styles for dialogs.
    * @return {!Reader}
@@ -2055,6 +2204,7 @@
       'z-index': '2147483647',
     }, 'important');
     dialog.setAttribute('aria-label', 'Speed Reader');
+    dialog.setAttribute('data-speed-reader', '');
     const host = /** @type {!HTMLElement} */ (
       document.createElement('speed-reader'));
     setStyles(host, {'all': 'initial'}, 'important');
@@ -2090,7 +2240,8 @@
       nextDue: 0,
       darkQuery: window.matchMedia('(prefers-color-scheme: dark)'),
       viewport: null,
-      overflow: null,
+      rootStyles: [],
+      backdropSheet: createBackdropSheet(),
       focus: null,
     };
     attachReaderListeners(reader);
@@ -2120,13 +2271,22 @@
       (document.head || document.documentElement).append(viewport);
       reader.viewport = viewport;
     }
-    const rootStyle = document.documentElement.style;
-    reader.overflow = {
-      value: rootStyle.getPropertyValue('overflow'),
-      priority: rootStyle.getPropertyPriority('overflow'),
-    };
-    rootStyle.setProperty('overflow', 'hidden', 'important');
-    document.documentElement.append(reader.dialog);
+    // Without its scroll bar, the page would get wider behind the reader:
+    // a stable gutter keeps its place (only if there is one, as with
+    // classic scroll bars).
+    const root = document.documentElement;
+    const hasScrollBar = window.innerWidth > root.clientWidth;
+    reader.rootStyles = ['overflow', 'scrollbar-gutter'].map((name) => ({
+      name,
+      value: root.style.getPropertyValue(name),
+      priority: root.style.getPropertyPriority(name),
+    }));
+    root.style.setProperty('overflow', 'hidden', 'important');
+    if (hasScrollBar) {
+      root.style.setProperty('scrollbar-gutter', 'stable', 'important');
+    }
+    adoptBackdropSheet(reader, true);
+    root.append(reader.dialog);
     try {
       reader.dialog.showModal();
     } catch {
@@ -2150,13 +2310,15 @@
     if (dialog.open) dialog.close();
     dialog.remove();
     const rootStyle = document.documentElement.style;
-    if (reader.overflow?.value) {
-      rootStyle.setProperty('overflow', reader.overflow.value,
-          reader.overflow.priority);
-    } else {
-      rootStyle.removeProperty('overflow');
+    for (const {name, value, priority} of reader.rootStyles) {
+      if (value) {
+        rootStyle.setProperty(name, value, priority);
+      } else {
+        rootStyle.removeProperty(name);
+      }
     }
-    reader.overflow = null;
+    reader.rootStyles = [];
+    adoptBackdropSheet(reader, false);
     reader.viewport?.remove();
     reader.viewport = null;
     reader.focus?.focus({preventScroll: true});
@@ -2173,19 +2335,18 @@
     const key = content.paragraphs.map((paragraph) => paragraph.text)
         .join('\n');
     reader.ui.heading.textContent = content.title;
+    // Stops playback and stores the position in the previous text.
+    pause(reader);
     if (key === reader.key) {
-      pause(reader);
       render(reader);
       return;
     }
-    clearTimer(reader);
     reader.text = tokenize(content.paragraphs);
     reader.key = key;
     reader.source = content.source;
     reader.hash = hashText(key);
     reader.factors = pieceFactors(reader.text);
     reader.sums = suffixSums(reader.factors);
-    reader.playing = false;
     reader.finished = false;
     reader.resumeRewind = false;
     const word = content.source === 'page' ?
@@ -2236,6 +2397,21 @@
         if (reader && reader.dialog.isConnected) renderSettings(reader);
       });
 
-  GM_registerMenuCommand('Speed Reader: Read this page',
-      () => showReader(extractContent()), {id: 'read', autoClose: true});
+  // While the reader is open, the page is inert: nothing new can be
+  // selected, and the old selection reads as empty. The command then only
+  // gives the reader the focus again.
+  GM_registerMenuCommand('Speed Reader: Read this page', () => {
+    const reader = state.reader;
+    if (reader && reader.dialog.isConnected) {
+      reader.ui.panel.focus({preventScroll: true});
+    } else {
+      showReader(extractContent());
+    }
+  }, {id: 'read', autoClose: true});
+  GM_registerMenuCommand('Speed Reader: Forget reading positions',
+      forgetPositions, {
+        id: 'forget',
+        title: 'Forget where you stopped reading in all pages',
+        autoClose: true,
+      });
 })();

@@ -1,7 +1,8 @@
 /**
  * @fileoverview Declarations for the Violentmonkey APIs used by the scripts,
  * so that the editor and `tsc -p jsconfig.json` can type-check them. Only the
- * functions granted via @grant somewhere in scripts/ are listed.
+ * functions granted via @grant somewhere in scripts/ are listed, and
+ * GM_info, which needs no grant.
  * See https://violentmonkey.github.io/api/gm/.
  */
 
@@ -13,6 +14,12 @@ declare function GM_addValueChangeListener(
     name: string,
     callback: (name: string, oldValue: any, newValue: any,
         remote: boolean) => void): string;
+/** Information about the script and the script manager (no @grant). */
+declare const GM_info: {
+  /** True in a private window (Firefox) or incognito profile; VM 2.15.4+. */
+  readonly isIncognito?: boolean,
+  readonly [key: string]: unknown,
+};
 declare function GM_registerMenuCommand(
     caption: string, onClick: (event: MouseEvent | KeyboardEvent) => void,
     options?: {id?: string, title?: string, autoClose?: boolean}): string;

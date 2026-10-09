@@ -514,10 +514,37 @@ describe('keyAction', () => {
     assert.equal(core.keyAction('ArrowLeft', 'other', true), '');
   });
 
+  it('leaves Space and Left/Right to the words of the sentence', () => {
+    assert.equal(core.keyAction(' ', 'word', false), '');
+    assert.equal(core.keyAction('ArrowLeft', 'word', false), '');
+    assert.equal(core.keyAction('ArrowRight', 'word', false), '');
+    assert.equal(core.keyAction('ArrowUp', 'word', false), 'faster');
+    assert.equal(core.keyAction('Escape', 'word', false), 'close');
+  });
+
   it('closes on Escape, also in text fields', () => {
     assert.equal(core.keyAction('Escape', 'other', false), 'close');
     assert.equal(core.keyAction('Escape', 'text', false), 'close');
     assert.equal(core.keyAction('Escape', 'other', true), '');
+  });
+});
+
+describe('wordFocusTarget', () => {
+  it('moves between the words with the arrow keys, Home and End', () => {
+    assert.equal(core.wordFocusTarget('ArrowRight', 2, 5), 3);
+    assert.equal(core.wordFocusTarget('ArrowLeft', 2, 5), 1);
+    assert.equal(core.wordFocusTarget('Home', 2, 5), 0);
+    assert.equal(core.wordFocusTarget('End', 2, 5), 4);
+  });
+
+  it('stays at the first and the last word', () => {
+    assert.equal(core.wordFocusTarget('ArrowLeft', 0, 5), 0);
+    assert.equal(core.wordFocusTarget('ArrowRight', 4, 5), 4);
+  });
+
+  it('ignores other keys', () => {
+    assert.equal(core.wordFocusTarget('ArrowUp', 2, 5), -1);
+    assert.equal(core.wordFocusTarget(' ', 2, 5), -1);
   });
 });
 
