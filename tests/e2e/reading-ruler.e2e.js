@@ -126,6 +126,12 @@ describe('article page', () => {
         assert.ok(covers(await ruler(page), word));
       }));
 
+  it('works on old pages laid out with tables and font elements', () =>
+    withPage('legacy.html', async (page) => {
+      const word = await clickWord(page, 'font', 'Second');
+      assert.ok(covers(await ruler(page), word));
+    }));
+
   it('ends before a floating box beside the line', () => withPage(
       'float.html', async (page) => {
         const boxLeft = await page.evaluate(() =>

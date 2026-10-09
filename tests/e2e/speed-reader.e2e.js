@@ -266,6 +266,40 @@ describe('article page', () => {
     }, {settings: {skip: 1}});
   });
 
+  it('reads old pages laid out with tables, font elements and line breaks',
+      async () => {
+        await withPage('legacy.html', async (page) => {
+          await openReader(page);
+          const words = await collectWords(page);
+          assert.equal(words.join(' '), [
+            'Old pages',
+            'The first paragraph of this essay has no element of its own,',
+            'and it ends without a period, because its writer, who likes',
+            'lists, put a line break after every thought, and two of them',
+            'after every paragraph',
+            'Second paragraph, which starts after two line breaks, is long',
+            'enough to wrap onto a few lines, with commas, clauses and plenty',
+            'of words, so that the page has enough text to be read at all.',
+            'The third paragraph closes the essay, again with commas,',
+            'clauses, and words, before the notes in their table of their',
+            'own.',
+            'Notes',
+            'A note in a table of its own.',
+          ].join(' '));
+          // Two line breaks end a paragraph, and with it a sentence.
+          const sentence = await page.evaluate(() => {
+            // collectWords left the reader at the end of the text.
+            const back = reader('.sr-back');
+            for (let index = 0; index < 200; index++) {
+              if (reader('.sr-mark').textContent === 'Second') break;
+              back.click();
+            }
+            return reader('.sr-context [data-word]').textContent;
+          });
+          assert.equal(sentence, 'Second');
+        }, {settings: {skip: 1}});
+      });
+
   it('shows long words in pieces', async () => {
     await withPage('speed-reader.html', async (page) => {
       await openReader(page);
