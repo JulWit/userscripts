@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.5.0
+// @version      1.5.1
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size, and can read it aloud
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -1297,12 +1297,30 @@
       outline-offset: 1px;
     }
 
-    .sr-button:not(:disabled):hover {
-      filter: brightness(.94);
+    /* A tint of the button's own text color over its background: darker
+       in light mode, lighter in dark mode, toward the panel on the primary
+       button. Only where hovering is possible, as a tap leaves a touch
+       screen's hover on the button. */
+    @media (hover: hover) {
+      .sr-button:not(:disabled):hover {
+        background-image: linear-gradient(
+            color-mix(in srgb, currentColor 14%, transparent),
+            color-mix(in srgb, currentColor 14%, transparent));
+      }
+
+      .sr-close:hover {
+        color: var(--sr-text) !important;
+      }
+
+      .sr-context-word:hover {
+        text-decoration: underline;
+      }
     }
 
-    .sr-context-word:hover {
-      text-decoration: underline;
+    .sr-button:not(:disabled):active {
+      background-image: linear-gradient(
+          color-mix(in srgb, currentColor 24%, transparent),
+          color-mix(in srgb, currentColor 24%, transparent));
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -1458,7 +1476,9 @@
       'width': '100%',
     }, 'sr-panel');
     panel.tabIndex = -1;
-    theme(panel, {'background': 'background', 'color': 'text'});
+    // --sr-text gives the style sheet the text color of the theme.
+    theme(panel,
+        {'background': 'background', 'color': 'text', '--sr-text': 'text'});
 
     const header = createElement('div', {
       'align-items': 'center',
