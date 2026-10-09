@@ -240,6 +240,32 @@ describe('article page', () => {
     }, {settings: {skip: 1}});
   });
 
+  it('keeps words apart and leaves out tables of data, edit links and ' +
+      'references (wiki and news markup)', async () => {
+    await withPage('speed-reader-structure.html', async (page) => {
+      await openReader(page);
+      const words = await collectWords(page);
+      assert.equal(words.join(' '), [
+        // A kicker and a title in boxes of their own in the heading.
+        'Kicker line Rivers of Europe',
+        // White space in nodes of its own: between <b> and <i>, and
+        // &nbsp; in a span and in the text.
+        'The Danube (German Donau) is the second longest river in Europe.',
+        'Its native name differs from country to country, and it rises at',
+        'an elevation of 1078 m in the hills.',
+        // A layout table without header cells stays.
+        'A layout cell keeps its text, as old pages put their whole',
+        'content into tables like this one.',
+        // Without its [edit] link.
+        'Navigation',
+        'Ships have carried goods on the river for centuries, and many',
+        'travelers enjoy the slow pace of a cruise between its cities.',
+        // Without the list of references.
+        'References',
+      ].join(' '));
+    }, {settings: {skip: 1}});
+  });
+
   it('shows long words in pieces', async () => {
     await withPage('speed-reader.html', async (page) => {
       await openReader(page);

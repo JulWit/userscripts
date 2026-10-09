@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.3.4
+// @version      1.4.0
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -9,7 +9,7 @@
 // @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiMyYjJmMzYiLz48ZyBmaWxsPSIjOWFhM2FkIj48cmVjdCB4PSI4IiB5PSIxNyIgd2lkdGg9IjQ4IiBoZWlnaHQ9IjIiIHJ4PSIxIiBvcGFjaXR5PSIuNiIvPjxyZWN0IHg9IjgiIHk9IjQ1IiB3aWR0aD0iNDgiIGhlaWdodD0iMiIgcng9IjEiIG9wYWNpdHk9Ii42Ii8+PHJlY3QgeD0iMjYiIHk9IjExIiB3aWR0aD0iMyIgaGVpZ2h0PSI4IiByeD0iMS41Ii8+PHJlY3QgeD0iMjYiIHk9IjQ1IiB3aWR0aD0iMyIgaGVpZ2h0PSI4IiByeD0iMS41Ii8+PHJlY3QgeD0iMTAiIHk9IjI3IiB3aWR0aD0iMTIiIGhlaWdodD0iMTAiIHJ4PSIzIi8+PHJlY3QgeD0iMzMiIHk9IjI3IiB3aWR0aD0iMjEiIGhlaWdodD0iMTAiIHJ4PSIzIi8+PC9nPjxyZWN0IHg9IjIzLjUiIHk9IjI1IiB3aWR0aD0iOCIgaGVpZ2h0PSIxNCIgcng9IjMiIGZpbGw9IiNmZjVhNDUiLz48L3N2Zz4K
 // @updateURL    https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/speed-reader.user.js
 // @downloadURL  https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/speed-reader.user.js
-// @require      https://raw.githubusercontent.com/JulWit/userscripts/main/lib/content-detection.js?v=1.0.0
+// @require      https://raw.githubusercontent.com/JulWit/userscripts/main/lib/content-detection.js?v=1.1.0
 // @match        *://*/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -959,12 +959,17 @@
     heldKeys: new Set(),
   };
 
-  // Content detection (lib/content-detection.js). Code is not read, nor what
-  // a screen reader would skip; footnote links are left out.
+  // Content detection (lib/content-detection.js). Read word by word, code,
+  // tables of data (infoboxes) and lists of references are noise, as are
+  // the edit links of wiki headings; nor is what a screen reader would
+  // skip read, and footnote links are left out.
   const detector = ContentDetection.createDetector({
     codeBlocks: 'skip',
     skipAriaHidden: true,
     skipFootnoteReferences: true,
+    skipDataTables: true,
+    skippedNames: ['editsection', 'infobox', 'navbox', 'navframe', 'refbegin',
+      'references', 'reflist'],
     requireBlockLikeRoot: false,
   });
   const HEADING_TAGS = new Set(ContentDetection.config.headingTags);
@@ -1021,21 +1026,54 @@
               NodeFilter.FILTER_ACCEPT :
               NodeFilter.FILTER_SKIP;
         });
+    /** @type {?Element} */
+    let box = null;
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       if (node.nodeType !== Node.TEXT_NODE) {
         parts.push(' ');
         continue;
       }
-      const owner = detector.blockOf(/** @type {!Text} */ (node), root);
+      const text = /** @type {!Text} */ (node);
+      // White space of its own ("<b>A</b> <i>B</i>", "&nbsp;" in a span)
+      // belongs to no block, but separates the words around it.
+      if (!/\S/.test(text.data)) {
+        parts.push(' ');
+        continue;
+      }
+      const owner = detector.blockOf(text, root);
       if (!owner) continue;
       if (owner !== block) {
         flush();
         block = owner;
+        box = null;
       }
-      parts.push(/** @type {!Text} */ (node).data);
+      // Boxes of their own inside a block (a kicker above a title, both in
+      // the heading) start new lines: their words are separate too.
+      const ownBox = boxOf(text, owner);
+      if (box && ownBox !== box) parts.push(' ');
+      box = ownBox;
+      parts.push(text.data);
     }
     flush();
     return paragraphs;
+  }
+
+  /**
+   * The box a text node is laid out in within its block: its nearest
+   * ancestor below the block that is not laid out inline, or the block.
+   * @param {!Text} text
+   * @param {!Element} block
+   * @return {!Element}
+   */
+  function boxOf(text, block) {
+    for (let element = text.parentElement; element && element !== block;
+      element = element.parentElement) {
+      const display = detector.styleOf(element).display;
+      if (!display.startsWith('inline') && display !== 'contents') {
+        return element;
+      }
+    }
+    return block;
   }
 
   /**
