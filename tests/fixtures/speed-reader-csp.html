@@ -20,16 +20,19 @@
 </main>
 <script>
   // As in a Firefox content script: adopting a constructed style sheet
-  // fails, so the reader falls back to a style element, which the policy
-  // blocks.
-  Object.defineProperty(ShadowRoot.prototype, 'adoptedStyleSheets', {
-    get() {
-      return [];
-    },
-    set() {
-      throw new TypeError('Accessing from Xray wrapper is not supported.');
-    },
-  });
+  // fails, in the shadow root and in the document. The reader falls back to
+  // a style element, which the policy blocks, and leaves the page's styles
+  // for ::backdrop in effect.
+  for (const target of [ShadowRoot.prototype, Document.prototype]) {
+    Object.defineProperty(target, 'adoptedStyleSheets', {
+      get() {
+        return [];
+      },
+      set() {
+        throw new TypeError('Accessing from Xray wrapper is not supported.');
+      },
+    });
+  }
 </script>
 <script src="harness.js"></script>
 <script src="../../lib/content-detection.js"></script>

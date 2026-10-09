@@ -996,16 +996,22 @@ describe('overlay', () => {
           scrollWidth: backdrop.scrollWidth,
           width: backdrop.clientWidth,
           panel: {width: panel.width, height: panel.height},
-          buttons: [...backdrop.querySelectorAll('button, input')]
-              .map((element) => {
-                const box = element.getBoundingClientRect();
-                return {
-                  name: element.className,
-                  height: box.height,
-                  width: box.width,
-                  right: box.right,
-                };
-              }),
+          // Controls, without the words of the sentence.
+          buttons: [...backdrop.querySelectorAll(
+              'button:not([data-word]), input')].map((element) => {
+            const box = element.getBoundingClientRect();
+            return {
+              name: element.className,
+              height: box.height,
+              width: box.width,
+              right: box.right,
+            };
+          }),
+          words: [...backdrop.querySelectorAll('[data-word]')]
+              .map((element) => ({
+                text: element.textContent,
+                height: element.getBoundingClientRect().height,
+              })),
         };
       });
       assert.ok(layout.scrollWidth <= layout.width,
@@ -1016,6 +1022,12 @@ describe('overlay', () => {
         assert.ok(button.height >= 44, `${button.name}: ${button.height}`);
         assert.ok(button.width >= 44, `${button.name}: ${button.width}`);
         assert.ok(button.right <= layout.width, button.name);
+      }
+      // The words of the sentence are smaller targets, but at least 24 px
+      // high (WCAG 2.5.8).
+      assert.ok(layout.words.length > 0);
+      for (const word of layout.words) {
+        assert.ok(word.height >= 24, `${word.text}: ${word.height}`);
       }
     }, {settings: {wpm: 1000, fontSize: 96, skip: 1}});
   });
@@ -1056,6 +1068,24 @@ describe('page with a strict style policy', () => {
       });
     });
   });
+
+  it('works where style sheets cannot be adopted (content script)',
+      async () => {
+        await withPage('speed-reader-csp.html', async (page) => {
+          const errors = [];
+          page.on('pageerror', (error) => errors.push(error.message));
+          await openReader(page);
+          await page.click('.sr-play');
+          assert.equal((await readerState(page)).playing, true);
+          await page.click('.sr-play');
+          await page.keyboard.press('Escape');
+          assert.equal(await isOpen(page), false);
+          // It opens again, with its text.
+          await openReader(page);
+          assert.ok((await readerState(page)).total > 0);
+          assert.deepEqual(errors, []);
+        });
+      });
 });
 
 describe('page without text', () => {

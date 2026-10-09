@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.3.1
+// @version      1.3.2
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -1362,10 +1362,12 @@
     stage.append(guide, word, message);
 
     // While paused: the current sentence, whose words can be clicked to go
-    // to them.
+    // to them. Three lines high; a line height of 1.6 makes each word a
+    // target of at least 24 px for a finger.
     const context = createElement('p', {
       'font-size': '16px',
-      'height': '4.2em',
+      'height': '4.8em',
+      'line-height': '1.6',
       'margin': '0',
       'overflow-y': 'auto',
       'position': 'relative',
