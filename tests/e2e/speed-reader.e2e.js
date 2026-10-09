@@ -424,6 +424,24 @@ describe('controls', () => {
     });
   });
 
+  it('keeps the release of Escape from the page after closing', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await page.evaluate(() => {
+        window.pageEscapes = 0;
+        document.addEventListener('keyup', (event) => {
+          if (event.key === 'Escape') window.pageEscapes++;
+        });
+      });
+      await openReader(page);
+      await page.keyboard.press('Escape');
+      assert.equal(await isOpen(page), false);
+      assert.equal(await page.evaluate(() => window.pageEscapes), 0);
+      // The next Escape belongs to the page.
+      await page.keyboard.press('Escape');
+      assert.equal(await page.evaluate(() => window.pageEscapes), 1);
+    });
+  });
+
   it('keeps clicks and wheel events from the page', async () => {
     await withPage('speed-reader.html', async (page) => {
       await page.evaluate(() => {
@@ -600,6 +618,24 @@ describe('settings', () => {
       assert.equal((await readerState(page)).index, 5);
     });
   });
+
+  it('do not move a dragged slider for changes made in another tab',
+      async () => {
+        await withPage('speed-reader.html', async (page) => {
+          await openReader(page);
+          const box = await page.locator('.sr-fontSize').boundingBox();
+          await page.mouse.move(box.x + 2, box.y + box.height / 2);
+          await page.mouse.down();
+          await page.evaluate(() => harnessSetRemoteValue('settings',
+              {wpm: 450, fontSize: 80, skip: 4}));
+          const dragged = await page.inputValue('.sr-fontSize');
+          assert.notEqual(dragged, '80');
+          assert.equal(await page.inputValue('.sr-wpm'), '450');
+          await page.mouse.up();
+          // Released, the slider's value is stored.
+          assert.equal((await storedSettings(page)).fontSize, Number(dragged));
+        });
+      });
 
   it('corrects an invalid skip value when the field is left', async () => {
     await withPage('speed-reader.html', async (page) => {
@@ -797,9 +833,36 @@ describe('overlay', () => {
     });
   });
 
+  it('stores a position under the page the text was read on, not its URL',
+      async () => {
+        let positions = null;
+        await withPage('speed-reader.html', async (page) => {
+          await openReader(page);
+          await page.click('.sr-forward');
+          // A web app changes the URL while the reader is open.
+          await page.evaluate(() => history.pushState(null, '', 'elsewhere'));
+          await page.keyboard.press('Escape');
+          positions = await page.evaluate(() => GM_getValue('positions'));
+        });
+        assert.equal(positions.length, 1);
+        assert.equal(JSON.stringify(positions).includes('speed-reader'),
+            false);
+        await withPage('speed-reader.html', async (page) => {
+          await openReader(page);
+          assert.equal((await readerState(page)).index, 11);
+        }, {positions});
+      });
+
+  it('removes positions of older versions, which hold the URL', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      assert.deepEqual(await page.evaluate(() => GM_getValue('positions')),
+          []);
+    }, {positions: [{url: 'https://a.example/', hash: 'h', word: 3}]});
+  });
+
   it('neither stores nor uses positions in a private window', async () => {
-    const url = `${baseUrl}/tests/fixtures/speed-reader.html`;
-    const stored = [{url, hash: 'any', word: 30}];
+    const stored = [{page: 'any', hash: 'any', word: 30}];
     await withPage('speed-reader.html', async (page) => {
       await openReader(page);
       assert.equal((await readerState(page)).index, 1);
@@ -819,6 +882,11 @@ describe('overlay', () => {
           .length, 1);
       await page.evaluate(() =>
         harnessRunMenuCommand('Speed Reader: Forget reading positions'));
+      assert.deepEqual(await page.evaluate(() => GM_getValue('positions')),
+          []);
+      // Opening and closing the reader does not store it again.
+      await openReader(page);
+      await page.keyboard.press('Escape');
       assert.deepEqual(await page.evaluate(() => GM_getValue('positions')),
           []);
       // Read on, the position is stored again.

@@ -429,15 +429,29 @@ describe('remembered positions', () => {
     assert.equal(core.withoutHash('https://a.example/'), 'https://a.example/');
   });
 
+  it('keys pages by a hash of their URL, not the URL itself', () => {
+    const key = core.pageKey('https://a.example/article?id=7#comments');
+    assert.equal(key, core.pageKey('https://a.example/article?id=7'));
+    assert.notEqual(key, core.pageKey('https://a.example/article?id=8'));
+    assert.doesNotMatch(key, /example|article/);
+  });
+
   it('keeps valid stored positions only', () => {
     assert.deepEqual(core.sanitizePositions(null), []);
     assert.deepEqual(core.sanitizePositions([
-      {url: 'a', hash: 'h', word: 3, extra: true},
-      {url: 'b', hash: 'h', word: 0},
-      {url: 'c', hash: 'h', word: 1.5},
-      {url: 7, hash: 'h', word: 2},
+      {page: 'a', hash: 'h', word: 3, extra: true},
+      {page: 'b', hash: 'h', word: 0},
+      {page: 'c', hash: 'h', word: 1.5},
+      {page: 7, hash: 'h', word: 2},
       'd',
-    ]), [{url: 'a', hash: 'h', word: 3}]);
+    ]), [{page: 'a', hash: 'h', word: 3}]);
+  });
+
+  it('drops positions of older versions, which hold the URL', () => {
+    assert.deepEqual(core.sanitizePositions([
+      {url: 'https://a.example/', hash: 'h', word: 3},
+      {page: 'p', url: 'https://a.example/', hash: 'h', word: 3},
+    ]), []);
   });
 
   it('puts the newest position first and limits their number', () => {
@@ -445,19 +459,19 @@ describe('remembered positions', () => {
     let positions = [];
     for (let index = 0; index < maxPositions + 5; index++) {
       positions = core.withPosition(positions,
-          {url: `u${index}`, hash: 'h', word: 1});
+          {page: `p${index}`, hash: 'h', word: 1});
     }
     assert.equal(positions.length, maxPositions);
-    assert.equal(positions[0].url, `u${maxPositions + 4}`);
-    positions = core.withPosition(positions, {url: 'u10', hash: 'h', word: 9});
-    assert.deepEqual(positions[0], {url: 'u10', hash: 'h', word: 9});
-    assert.equal(positions.filter((entry) => entry.url === 'u10').length, 1);
-    assert.equal(core.withoutPosition(positions, 'u10').length,
+    assert.equal(positions[0].page, `p${maxPositions + 4}`);
+    positions = core.withPosition(positions, {page: 'p10', hash: 'h', word: 9});
+    assert.deepEqual(positions[0], {page: 'p10', hash: 'h', word: 9});
+    assert.equal(positions.filter((entry) => entry.page === 'p10').length, 1);
+    assert.equal(core.withoutPosition(positions, 'p10').length,
         maxPositions - 1);
   });
 
   it('restores a position only for the same text', () => {
-    const positions = [{url: 'a', hash: 'h1', word: 12}];
+    const positions = [{page: 'a', hash: 'h1', word: 12}];
     assert.equal(core.rememberedWord(positions, 'a', 'h1'), 12);
     assert.equal(core.rememberedWord(positions, 'a', 'h2'), 0);
     assert.equal(core.rememberedWord(positions, 'b', 'h1'), 0);

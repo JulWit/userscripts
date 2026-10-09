@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.3.0
+// @version      1.3.1
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -121,9 +121,10 @@
    */
 
   /**
-   * Remembered reading position in the text of a page: url without its
-   * hash, hash of the text (hashText) and the index of the word.
-   * @typedef {{url: string, hash: string, word: number}} Position
+   * Remembered reading position in the text of a page: page is the hash of
+   * its URL (pageKey), so that the storage holds no readable history, hash
+   * the hash of its text (hashText) and word the index of the word.
+   * @typedef {{page: string, hash: string, word: number}} Position
    */
 
   // ===========================================================================
@@ -763,17 +764,28 @@
   }
 
   /**
-   * Validates stored positions.
+   * @param {string} href
+   * @return {string} Key of a page for its remembered position: a hash of
+   *     its URL without the hash part.
+   */
+  function pageKey(href) {
+    return hashText(withoutHash(href));
+  }
+
+  /**
+   * Validates stored positions. Entries of version 1.2 and 1.3.0, with the
+   * URL itself, are dropped.
    * @param {*} value
    * @return {!Array<!Position>}
    */
   function sanitizePositions(value) {
     if (!Array.isArray(value)) return [];
     return value.filter((entry) => entry && typeof entry === 'object' &&
-        typeof entry.url === 'string' && typeof entry.hash === 'string' &&
-        Number.isInteger(entry.word) && entry.word > 0)
+        typeof entry.page === 'string' && typeof entry.hash === 'string' &&
+        !('url' in entry) && Number.isInteger(entry.word) && entry.word > 0)
         .slice(0, CONFIG.maxPositions)
-        .map((entry) => ({url: entry.url, hash: entry.hash, word: entry.word}));
+        .map((entry) => ({page: entry.page, hash: entry.hash,
+          word: entry.word}));
   }
 
   /**
@@ -785,28 +797,28 @@
   function withPosition(positions, position) {
     return [
       position,
-      ...positions.filter((entry) => entry.url !== position.url),
+      ...positions.filter((entry) => entry.page !== position.page),
     ].slice(0, CONFIG.maxPositions);
   }
 
   /**
    * @param {!Array<!Position>} positions
-   * @param {string} url
+   * @param {string} page Key of the page (pageKey).
    * @return {!Array<!Position>} The positions without the one of the page.
    */
-  function withoutPosition(positions, url) {
-    return positions.filter((entry) => entry.url !== url);
+  function withoutPosition(positions, page) {
+    return positions.filter((entry) => entry.page !== page);
   }
 
   /**
    * @param {!Array<!Position>} positions
-   * @param {string} url
+   * @param {string} page Key of the page (pageKey).
    * @param {string} hash Hash of the text now on the page.
    * @return {number} Remembered word index, 0 if there is none or the text
    *     changed.
    */
-  function rememberedWord(positions, url, hash) {
-    const entry = positions.find((position) => position.url === url);
+  function rememberedWord(positions, page, hash) {
+    const entry = positions.find((position) => position.page === page);
     return entry && entry.hash === hash ? entry.word : 0;
   }
 
@@ -837,6 +849,7 @@
     fitWord,
     hashText,
     withoutHash,
+    pageKey,
     sanitizePositions,
     withPosition,
     withoutPosition,
@@ -882,10 +895,13 @@
   /**
    * The reader. dialog is the modal dialog that holds the overlay; it is in
    * the page only while the reader is open. host holds the interface in a
-   * closed shadow root. source tells where the text came from; hash
-   * identifies a page's text for the remembered position, and savedWord is
-   * the word last stored for it. index is the shown piece; finished tells
-   * that playback ran to the end, so that Play starts over. resumeRewind
+   * closed shadow root. source tells where the text came from; page is the
+   * key of the page it came from (pageKey, taken when it was loaded, as a
+   * web app may change the URL later), hash identifies the text for the
+   * remembered position, and savedWord is the word last stored for it (or
+   * the word shown when the positions were forgotten). index is the shown
+   * piece; finished tells that playback ran to the end, so that Play starts
+   * over. resumeRewind
    * tells that playback was paused (not moved since), so that Play goes back
    * a little. rampStep counts the pieces shown since playback started.
    * nextDue is the time (performance.now()) at which the next piece is due.
@@ -893,16 +909,17 @@
    * page, rootStyles the page's inline styles of the root element that it
    * replaced, and focus the element that had the focus before.
    * backdropSheet hides the dialog's ::backdrop (null if it cannot be
-   * created).
+   * created). draggedSlider is the slider the pointer is pressed on.
    * @typedef {{dialog: !HTMLDialogElement, host: !HTMLElement,
    *     shadow: !ShadowRoot, ui: !Ui, text: !ReaderText, key: string,
-   *     source: ('page'|'selection'), hash: string, savedWord: number,
+   *     source: ('page'|'selection'), page: string, hash: string,
+   *     savedWord: number,
    *     factors: !Array<number>, sums: !Array<number>, index: number,
    *     playing: boolean, finished: boolean, resumeRewind: boolean,
    *     rampStep: number, timer: number, nextDue: number,
    *     darkQuery: !MediaQueryList, viewport: ?HTMLMetaElement,
    *     rootStyles: !Array<{name: string, value: string, priority: string}>,
-   *     backdropSheet: ?CSSStyleSheet,
+   *     backdropSheet: ?CSSStyleSheet, draggedSlider: ?HTMLInputElement,
    *     focus: ?HTMLElement}} Reader
    */
 
@@ -918,12 +935,16 @@
    * @property {!Settings} settings
    * @property {?Reader} reader Created on first use and kept after closing,
    *     so that the same text continues where it was.
+   * @property {!Set<string>} heldKeys Codes of the keys pressed while the
+   *     reader was open and not released yet: their other events do not
+   *     reach the page either, also after the reader closed (Escape).
    */
 
   /** @type {!State} */
   const state = {
     settings: sanitizeSettings(null),
     reader: null,
+    heldKeys: new Set(),
   };
 
   // Content detection (lib/content-detection.js). Code is not read, nor what
@@ -1747,11 +1768,13 @@
     ui.back.setAttribute('aria-label', `Back ${settings.skip} words`);
     ui.forward.title = `Forward ${settings.skip} words (→)`;
     ui.forward.setAttribute('aria-label', `Forward ${settings.skip} words`);
-    ui.wpm.value = String(settings.wpm);
+    // Keep a slider the user drags and what the user is typing.
+    if (reader.draggedSlider !== ui.wpm) ui.wpm.value = String(settings.wpm);
     ui.wpmValue.textContent = `${settings.wpm} wpm`;
-    ui.fontSize.value = String(settings.fontSize);
+    if (reader.draggedSlider !== ui.fontSize) {
+      ui.fontSize.value = String(settings.fontSize);
+    }
     ui.fontSizeValue.textContent = `${settings.fontSize} px`;
-    // Keep what the user is typing.
     if (reader.shadow.activeElement !== ui.skip) {
       ui.skip.value = String(settings.skip);
     }
@@ -1768,8 +1791,8 @@
     const empty = !reader.text.pieces.length;
     ui.message.style.setProperty('display', empty ? 'flex' : 'none');
     ui.message.textContent = empty ?
-        'No text found on this page. Select the text you want to read, ' +
-            'then start Speed Reader again.' :
+        'No text found on this page. Close the reader, select the text ' +
+            'you want to read, then start Speed Reader again.' :
         '';
     ui.guide.style.setProperty('visibility', empty ? 'hidden' : 'visible');
     for (const button of [ui.back, ui.play, ui.forward]) {
@@ -1933,11 +1956,19 @@
   // one leave no trace there.
   const REMEMBERS_POSITIONS = GM_info.isIncognito !== true;
 
-  /** @return {!Array<!Position>} */
+  /**
+   * Reads the stored positions. Invalid entries, and entries of older
+   * versions that hold the URL itself, are removed from the storage.
+   * @return {!Array<!Position>}
+   */
   function loadPositions() {
-    return REMEMBERS_POSITIONS ?
-        sanitizePositions(GM_getValue(CONFIG.storagePositions, [])) :
-        [];
+    if (!REMEMBERS_POSITIONS) return [];
+    const stored = GM_getValue(CONFIG.storagePositions, []);
+    const positions = sanitizePositions(stored);
+    if (!Array.isArray(stored) || stored.length !== positions.length) {
+      GM_setValue(CONFIG.storagePositions, positions);
+    }
+    return positions;
   }
 
   /**
@@ -1947,23 +1978,35 @@
    * @param {!Reader} reader
    */
   function savePosition(reader) {
-    const piece = reader.text.pieces[reader.index];
-    if (!REMEMBERS_POSITIONS || reader.source !== 'page' || !piece) return;
-    const word = reader.finished ? 0 : piece.word;
+    if (!REMEMBERS_POSITIONS || reader.source !== 'page' ||
+        !reader.text.pieces.length) {
+      return;
+    }
+    const word = currentWord(reader);
     if (word === reader.savedWord) return;
     reader.savedWord = word;
-    const url = withoutHash(location.href);
     const positions = loadPositions();
     GM_setValue(CONFIG.storagePositions, word ?
-        withPosition(positions, {url, hash: reader.hash, word}) :
-        withoutPosition(positions, url));
+        withPosition(positions, {page: reader.page, hash: reader.hash, word}) :
+        withoutPosition(positions, reader.page));
+  }
+
+  /**
+   * @param {!Reader} reader
+   * @return {number} The word to remember: the shown one, 0 at the end.
+   */
+  function currentWord(reader) {
+    const piece = reader.text.pieces[reader.index];
+    return piece && !reader.finished ? piece.word : 0;
   }
 
   /** Forgets the positions of all pages (menu command). */
   function forgetPositions() {
     GM_setValue(CONFIG.storagePositions, []);
-    // Reading on stores the position in this page again.
-    if (state.reader) state.reader.savedWord = 0;
+    // The shown word counts as stored: only reading on stores a position
+    // again, not closing or opening the reader.
+    const reader = state.reader;
+    if (reader) reader.savedWord = currentWord(reader);
   }
 
   // ===========================================================================
@@ -2029,9 +2072,18 @@
    */
   function onWindowKey(event) {
     const reader = state.reader;
-    if (!reader || !reader.dialog.isConnected) return;
+    const open = !!reader && reader.dialog.isConnected;
+    // The release of a key pressed in the reader (Escape, which closed it)
+    // belongs to the reader too; a new press does not.
+    const held = event.type !== 'keydown' && state.heldKeys.has(event.code);
+    if (event.type === 'keyup') state.heldKeys.delete(event.code);
+    if (!open && !held) return;
     event.stopImmediatePropagation();
-    if (event.type === 'keydown') onReaderKey(reader, event);
+    if (!reader || !open) return;
+    if (event.type === 'keydown') {
+      if (event.code) state.heldKeys.add(event.code);
+      onReaderKey(reader, event);
+    }
   }
 
   /**
@@ -2094,13 +2146,24 @@
     ui.backdrop.addEventListener('click', (event) => {
       if (pressedBeside && event.target === ui.backdrop) closeReader(reader);
     });
-    // Sliders store their value when released, not while dragged.
+    // Sliders store their value when released, not while dragged. A change
+    // from another tab does not move a slider while it is dragged.
     for (const name of /** @type {const} */ (['wpm', 'fontSize'])) {
       const input = ui[name];
+      input.addEventListener('pointerdown', () => {
+        reader.draggedSlider = input;
+      });
       input.addEventListener('input',
           () => changeSetting(reader, name, input.value, false));
-      input.addEventListener('change',
-          () => changeSetting(reader, name, input.value));
+      input.addEventListener('change', () => {
+        reader.draggedSlider = null;
+        changeSetting(reader, name, input.value);
+      });
+    }
+    for (const type of ['pointerup', 'pointercancel']) {
+      window.addEventListener(type, () => {
+        reader.draggedSlider = null;
+      }, true);
     }
     ui.skip.addEventListener('input', () => {
       if (ui.skip.value.trim() && ui.skip.checkValidity()) {
@@ -2227,6 +2290,7 @@
       text: {words: [], pieces: [], sentences: []},
       key: '\u0000',
       source: 'page',
+      page: '',
       hash: '',
       savedWord: 0,
       factors: [],
@@ -2242,6 +2306,7 @@
       viewport: null,
       rootStyles: [],
       backdropSheet: createBackdropSheet(),
+      draggedSlider: null,
       focus: null,
     };
     attachReaderListeners(reader);
@@ -2344,14 +2409,14 @@
     reader.text = tokenize(content.paragraphs);
     reader.key = key;
     reader.source = content.source;
+    reader.page = pageKey(location.href);
     reader.hash = hashText(key);
     reader.factors = pieceFactors(reader.text);
     reader.sums = suffixSums(reader.factors);
     reader.finished = false;
     reader.resumeRewind = false;
     const word = content.source === 'page' ?
-        rememberedWord(loadPositions(), withoutHash(location.href),
-            reader.hash) :
+        rememberedWord(loadPositions(), reader.page, reader.hash) :
         0;
     const remembered = reader.text.words[word];
     reader.index = remembered ? remembered.piece : 0;
@@ -2387,6 +2452,8 @@
     window.addEventListener(type,
         (event) => onWindowKey(/** @type {!KeyboardEvent} */ (event)), true);
   }
+  // Keys released in another window send no keyup here.
+  window.addEventListener('blur', () => state.heldKeys.clear());
 
   // Settings changed in another tab apply here too.
   GM_addValueChangeListener(CONFIG.storageSettings,
