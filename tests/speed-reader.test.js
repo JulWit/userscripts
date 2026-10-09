@@ -631,16 +631,19 @@ describe('theme colors', () => {
 
   // Foreground, background and minimum ratio: 4.5 for text (words are
   // shrunk below the size of large text), 3 for the boundary of the input
-  // field and the progress bar (WCAG 1.4.3, 1.4.11).
+  // field and the progress bar (WCAG 1.4.3, 1.4.11). The hovered Play
+  // button shows its label on the accent, the other buttons theirs in it.
   const pairs = [
     ['text', 'background', 4.5],
-    ['pivot', 'background', 4.5],
+    ['accent', 'background', 4.5],
     ['muted', 'background', 4.5],
     ['mark', 'background', 4.5],
     ['background', 'text', 4.5],
+    ['background', 'accent', 4.5],
     ['text', 'surface', 4.5],
+    ['accent', 'surface', 4.5],
     ['muted', 'surface', 3],
-    ['fill', 'line', 3],
+    ['accent', 'line', 3],
   ];
   for (const [name, colors] of Object.entries(core.themes)) {
     for (const [foreground, background, minimum] of pairs) {

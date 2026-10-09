@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.5.1
+// @version      1.6.0
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size, and can read it aloud
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -246,7 +246,9 @@
   // constructed style sheet cannot be adopted, and the page's policy may
   // block a style element. The color scheme is therefore followed through
   // matchMedia instead of a media query, and the style sheet below only
-  // adds what inline styles cannot express.
+  // adds what inline styles cannot express. The accent marks the fixation
+  // letter and colors the controls: progress bar, sliders, checkbox and the
+  // hovered buttons.
   const THEMES = deepFreeze({
     light: {
       backdrop: 'rgba(0, 0, 0, .45)',
@@ -254,22 +256,20 @@
       text: '#1f2328',
       muted: '#646b73',
       line: '#dcdbd5',
-      pivot: '#cc351d',
+      accent: '#cc351d',
       surface: '#ffffff',
       border: '#cfd2d6',
-      fill: '#56748c',
       mark: '#1f2328',
     },
     dark: {
       backdrop: 'rgba(0, 0, 0, .6)',
-      background: '#16181b',
+      background: '#161616',
       text: '#e7e6e1',
-      muted: '#9aa1a8',
-      line: '#33373d',
-      pivot: '#ff6b55',
-      surface: '#22252a',
-      border: '#3d4249',
-      fill: '#8fb0c9',
+      muted: '#a0a0a0',
+      line: '#363636',
+      accent: '#ff6b55',
+      surface: '#242424',
+      border: '#444444',
       mark: '#e7e6e1',
     },
   });
@@ -1297,19 +1297,66 @@
       outline-offset: 1px;
     }
 
-    /* A tint of the button's own text color over its background: darker
-       in light mode, lighter in dark mode, toward the panel on the primary
-       button. Only where hovering is possible, as a tap leaves a touch
-       screen's hover on the button. */
-    @media (hover: hover) {
-      .sr-button:not(:disabled):hover {
-        background-image: linear-gradient(
-            color-mix(in srgb, currentColor 14%, transparent),
-            color-mix(in srgb, currentColor 14%, transparent));
+    /* Sliders drawn in the theme's colors, so that the thumb can show a
+       halo on hover. Without this style sheet they stay native, colored by
+       accent-color. */
+    @supports selector(::-moz-range-thumb) {
+      .sr-range {
+        appearance: none;
+        background: transparent;
       }
 
+      .sr-range::-moz-range-track {
+        background: var(--sr-line);
+        border-radius: 3px;
+        height: 6px;
+      }
+
+      .sr-range::-moz-range-progress {
+        background: var(--sr-accent);
+        border-radius: 3px;
+        height: 6px;
+      }
+
+      .sr-range::-moz-range-thumb {
+        background: var(--sr-accent);
+        border: 0;
+        border-radius: 50%;
+        height: 20px;
+        transition: box-shadow 120ms;
+        width: 20px;
+      }
+    }
+
+    /* Hovered controls turn to the accent color. Only where hovering is
+       possible, as a tap leaves a touch screen's hover on the control. */
+    @media (hover: hover) {
+      .sr-back:not(:disabled):hover,
+      .sr-forward:not(:disabled):hover {
+        border-color: var(--sr-accent) !important;
+        color: var(--sr-accent) !important;
+      }
+
+      .sr-play:not(:disabled):hover {
+        background-color: var(--sr-accent) !important;
+        border-color: var(--sr-accent) !important;
+      }
+
+      /* The close button has no background of its own: a tint of the text
+         color shows a circle behind the icon. */
       .sr-close:hover {
+        background-color: color-mix(in srgb, var(--sr-text) 14%,
+            transparent) !important;
         color: var(--sr-text) !important;
+      }
+
+      .sr-skip:hover {
+        border-color: var(--sr-accent) !important;
+      }
+
+      .sr-range:hover::-moz-range-thumb {
+        box-shadow: 0 0 0 6px color-mix(in srgb, var(--sr-accent) 30%,
+            transparent);
       }
 
       .sr-context-word:hover {
@@ -1317,15 +1364,26 @@
       }
     }
 
+    .sr-range:active::-moz-range-thumb {
+      box-shadow: 0 0 0 8px color-mix(in srgb, var(--sr-accent) 40%,
+          transparent);
+    }
+
+    /* A pressed button gets a tint of its own text color over its
+       background (which the inline background shorthand resets). */
     .sr-button:not(:disabled):active {
       background-image: linear-gradient(
           color-mix(in srgb, currentColor 24%, transparent),
-          color-mix(in srgb, currentColor 24%, transparent));
+          color-mix(in srgb, currentColor 24%, transparent)) !important;
     }
 
     @media (prefers-reduced-motion: reduce) {
       .sr-fill {
         transition: none !important;
+      }
+
+      .sr-range::-moz-range-thumb {
+        transition: none;
       }
     }
   `;
@@ -1476,9 +1534,14 @@
       'width': '100%',
     }, 'sr-panel');
     panel.tabIndex = -1;
-    // --sr-text gives the style sheet the text color of the theme.
-    theme(panel,
-        {'background': 'background', 'color': 'text', '--sr-text': 'text'});
+    // The custom properties give the style sheet colors of the theme.
+    theme(panel, {
+      'background': 'background',
+      'color': 'text',
+      '--sr-accent': 'accent',
+      '--sr-line': 'line',
+      '--sr-text': 'text',
+    });
 
     const header = createElement('div', {
       'align-items': 'center',
@@ -1567,7 +1630,7 @@
     }, 'sr-word');
     const before = createElement('span', {}, 'sr-before');
     const pivot = createElement('span', {}, 'sr-pivot');
-    theme(pivot, {'color': 'pivot'});
+    theme(pivot, {'color': 'accent'});
     const after = createElement('span', {}, 'sr-after');
     word.append(before, pivot, after);
 
@@ -1612,7 +1675,7 @@
       'transition': 'width 120ms linear',
       'width': '0',
     }, 'sr-fill');
-    theme(fill, {'background': 'fill'});
+    theme(fill, {'background': 'accent'});
     track.append(fill);
 
     const status = createElement('div', {
@@ -1726,13 +1789,14 @@
                 'height': '44px',
                 'padding': '0 8px',
                 'width': '4.5em',
-              }, `sr-input sr-${name}`));
+              },
+          `sr-input sr-${name}${type === 'range' ? ' sr-range' : ''}`));
       input.type = type;
       input.min = String(range.min);
       input.max = String(range.max);
       input.step = String(range.step);
       theme(input, type === 'range' ?
-          {'accent-color': 'fill'} :
+          {'accent-color': 'accent'} :
           {'background': 'surface', 'border-color': 'muted', 'color': 'text'});
       const value = createElement('span', {
         'font-variant-numeric': 'tabular-nums',
@@ -1764,7 +1828,7 @@
           'width': '20px',
         }, 'sr-input sr-read-aloud'));
     readAloud.type = 'checkbox';
-    theme(readAloud, {'accent-color': 'fill'});
+    theme(readAloud, {'accent-color': 'accent'});
     const readAloudLabel = createElement('span', {}, 'sr-read-aloud-label');
     theme(readAloudLabel, {'color': 'muted'});
     readAloudField.append(readAloud, readAloudLabel);
