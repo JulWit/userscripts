@@ -104,6 +104,22 @@ describe('pauseAfter', () => {
     assert.equal(core.pauseAfter('etc.)', 'pears', 'and'), '');
   });
 
+  it('ends no sentence before a lower-case word or a number', () => {
+    assert.equal(core.pauseAfter('Abs.', 'in', '2'), '');
+    assert.equal(core.pauseAfter('Hauptstr.', 'der', '5'), '');
+    assert.equal(core.pauseAfter('bspw.', 'und', 'in'), '');
+    assert.equal(core.pauseAfter('12.03.', 'Am', 'fahren'), '');
+    assert.equal(core.pauseAfter('end.', 'the', '"and'), '');
+  });
+
+  it('ends no sentence after single letters (z. B., initials)', () => {
+    assert.equal(core.pauseAfter('z.', 'kaufen', 'B.'), '');
+    assert.equal(core.pauseAfter('B.', 'z.', 'Äpfel'), '');
+    assert.equal(core.pauseAfter('R.', 'J.', 'Tolkien'), '');
+    // But the English "I" often ends a sentence.
+    assert.equal(core.pauseAfter('I.', 'than', 'We'), 'sentence');
+  });
+
   it('tells ordinal numbers from numbers at the end of a sentence', () => {
     // Ordinal numbers: after an article or "am", before a month, a
     // lower-case word or a number, and at the start of a paragraph.
@@ -224,6 +240,18 @@ describe('tokenize', () => {
     assert.equal(text.pieces.length, 4);
     assert.deepEqual(text.pieces.map((piece) => piece.word), [0, 1, 1, 2]);
     assert.deepEqual(text.words.map((word) => word.piece), [0, 1, 3]);
+  });
+
+  it('keeps German abbreviations with spaces inside a sentence', () => {
+    const text = core.tokenize(paragraphs(
+        'Wir kaufen z. B. Äpfel, d. h. Obst, u. a. am 12.03. hier.'));
+    assert.deepEqual(text.words.filter((word) => word.pause)
+        .map((word) => [word.text, word.pause]), [
+      ['Äpfel,', 'clause'],
+      ['Obst,', 'clause'],
+      ['hier.', 'paragraph'],
+    ]);
+    assert.equal(text.sentences.length, 1);
   });
 
   it('passes the neighbors of a word to the sentence detection', () => {

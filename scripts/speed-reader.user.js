@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.3.2
+// @version      1.3.3
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -178,16 +178,13 @@
     // up to length 5, the third up to 9, the fourth up to 13, the fifth
     // beyond.
     pivotSteps: [1, 5, 9, 13],
-    // Abbreviations (lower case, without the period). After a "never" one a
-    // period ends no sentence; after an "ambiguous" one only if the next
-    // word starts with a capital letter.
-    abbreviations: {
-      never: ['abb', 'approx', 'bd', 'bzw', 'ca', 'cf', 'dr', 'evtl', 'fig',
-        'fr', 'ggf', 'hr', 'hrn', 'hrsg', 'inkl', 'jr', 'kap', 'mr', 'mrs',
-        'ms', 'nr', 'pp', 'prof', 'sog', 'sr', 'st', 'vgl', 'vol', 'vs',
-        'zzgl'],
-      ambiguous: ['etc', 'usf', 'usw'],
-    },
+    // Abbreviations (lower case, without the period) that usually come
+    // before a capitalized word or a name, so that their period ends no
+    // sentence. Before a lower-case word or a number, no period does.
+    abbreviations: ['abb', 'abs', 'approx', 'bd', 'bspw', 'bzw', 'ca', 'cf',
+      'dr', 'evtl', 'fig', 'fr', 'ggf', 'hr', 'hrn', 'hrsg', 'inkl', 'jr',
+      'kap', 'mio', 'mr', 'mrd', 'mrs', 'ms', 'nr', 'pp', 'prof', 'sog', 'sr',
+      'st', 'str', 'tel', 'vgl', 'vol', 'vs', 'zzgl'],
     // Words after which a number with a period is an ordinal number ("am 3.
     // Mai", "der 2. Platz"), and months that follow one ("3. Mai").
     ordinalWords: ['am', 'beim', 'das', 'dem', 'den', 'der', 'des', 'die',
@@ -309,29 +306,30 @@
   }
 
   /**
-   * Whether a period ends a sentence. It does not after an abbreviation
-   * ("z.B.", "Dr.", "bzw."), and after "usw." or "etc." only before a
-   * capital letter. A number of one or two digits is an ordinal number ("am
-   * 3. Mai") and ends no sentence at the start of a paragraph (a numbered
-   * heading or list item), after an article or a contraction such as "am",
-   * or before a lower-case word, a number or a month.
+   * Whether a period ends a sentence. It does not before a lower-case word
+   * or a number ("usw. gekauft", "Abs. 2", "12.03. fahren"), after a single
+   * letter ("z. B.", initials such as "J. R. R."), after letters with
+   * periods ("z.B.") or after a common abbreviation ("Dr.", "bzw."). A
+   * number of one or two digits, or a date such as "12.03.", is an ordinal
+   * number ("am 3. Mai") and ends no sentence at the start of a paragraph (a
+   * numbered heading or list item), after an article or a contraction such
+   * as "am", or before a month.
    * @param {string} text The word without closing quotes and brackets.
    * @param {string} previous The word before, '' at the paragraph start.
    * @param {string} next The word after, '' at the paragraph end.
    * @return {boolean}
    */
   function endsSentenceAtPeriod(text, previous, next) {
-    if (/^(?:\p{L}\.){2,}$/u.test(text)) return false;
-    const stem = text.replace(OPENING_PATTERN, '').slice(0, -1).toLowerCase();
     const following = next.replace(OPENING_PATTERN, '');
-    const capitalized = /^\p{Lu}/u.test(following);
-    const {never, ambiguous} = CONFIG.abbreviations;
-    if (never.includes(stem)) return false;
-    if (ambiguous.includes(stem)) return !following || capitalized;
-    if (/^\d{1,2}$/.test(stem)) {
+    if (/^[\p{Ll}\d]/u.test(following)) return false;
+    const word = text.replace(OPENING_PATTERN, '');
+    // Not the English "I", which often ends a sentence ("than I.").
+    if (/^(?:\p{L}\.)+$/u.test(word) && word !== 'I.') return false;
+    const stem = word.slice(0, -1).toLowerCase();
+    if (CONFIG.abbreviations.includes(stem)) return false;
+    if (/^\d{1,2}(?:\.\d{1,2})?$/.test(stem)) {
       const ordinal = !previous ||
           CONFIG.ordinalWords.includes(bareWord(previous)) ||
-          /^[\p{Ll}\d]/u.test(following) ||
           CONFIG.monthNames.includes(bareWord(following));
       return !ordinal;
     }
@@ -404,7 +402,11 @@
    */
   function splitLongWord(word) {
     const {maxLength} = CONFIG.split;
-    if (graphemes(word).length <= maxLength) return [word];
+    // A word has at most as many grapheme clusters as UTF-16 code units, so
+    // most words need no segmentation.
+    if (word.length <= maxLength || graphemes(word).length <= maxLength) {
+      return [word];
+    }
     const segments = word.match(/[^-–/_]*(?:[-–/_]+|$)/gu) || [word];
     /** @type {!Array<string>} */
     const merged = [];
