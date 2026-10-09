@@ -1122,7 +1122,7 @@ describe('page with a strict style policy', () => {
       assert.deepEqual(looks, {
         word: 'Strict',
         fontSize: '48px',
-        pivot: 'rgb(210, 56, 31)',
+        pivot: 'rgb(204, 53, 29)',
         play: 48,
         background: 'rgb(247, 246, 242)',
       });

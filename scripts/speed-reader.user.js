@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.4.1
+// @version      1.4.2
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -217,6 +217,42 @@
     storagePositions: 'positions',
     maxPositions: 50,
   });
+
+  // Colors of the reader in light and dark mode. The looks are set inline
+  // through the CSSOM, which no Content Security Policy blocks: in Firefox a
+  // script manager may have to run the script as a content script, where a
+  // constructed style sheet cannot be adopted, and the page's policy may
+  // block a style element. The color scheme is therefore followed through
+  // matchMedia instead of a media query, and the style sheet below only
+  // adds what inline styles cannot express.
+  const THEMES = deepFreeze({
+    light: {
+      backdrop: 'rgba(0, 0, 0, .45)',
+      background: '#f7f6f2',
+      text: '#1f2328',
+      muted: '#646b73',
+      line: '#dcdbd5',
+      pivot: '#cc351d',
+      surface: '#ffffff',
+      border: '#cfd2d6',
+      fill: '#56748c',
+      mark: '#1f2328',
+    },
+    dark: {
+      backdrop: 'rgba(0, 0, 0, .6)',
+      background: '#16181b',
+      text: '#e7e6e1',
+      muted: '#9aa1a8',
+      line: '#33373d',
+      pivot: '#ff6b55',
+      surface: '#22252a',
+      border: '#3d4249',
+      fill: '#8fb0c9',
+      mark: '#e7e6e1',
+    },
+  });
+
+  /** @typedef {keyof typeof THEMES.light} ThemeKey */
 
   // ===========================================================================
   // Pure functions: text, timing, settings (no DOM, no storage)
@@ -837,6 +873,7 @@
   /** The pure functions, for unit tests. */
   const CORE = Object.freeze({
     config: CONFIG,
+    themes: THEMES,
     graphemes,
     stripFootnoteMarkers,
     cleanText,
@@ -1100,42 +1137,6 @@
   // ===========================================================================
   // Reader overlay: elements and styles
   // ===========================================================================
-
-  // Colors of the reader in light and dark mode. The looks are set inline
-  // through the CSSOM, which no Content Security Policy blocks: in Firefox a
-  // script manager may have to run the script as a content script, where a
-  // constructed style sheet cannot be adopted, and the page's policy may
-  // block a style element. The color scheme is therefore followed through
-  // matchMedia instead of a media query, and the style sheet below only
-  // adds what inline styles cannot express.
-  const THEMES = deepFreeze({
-    light: {
-      backdrop: 'rgba(0, 0, 0, .45)',
-      background: '#f7f6f2',
-      text: '#1f2328',
-      muted: '#646b73',
-      line: '#dcdbd5',
-      pivot: '#d2381f',
-      surface: '#ffffff',
-      border: '#cfd2d6',
-      fill: '#56748c',
-      mark: '#1f2328',
-    },
-    dark: {
-      backdrop: 'rgba(0, 0, 0, .6)',
-      background: '#16181b',
-      text: '#e7e6e1',
-      muted: '#9aa1a8',
-      line: '#33373d',
-      pivot: '#ff6b55',
-      surface: '#22252a',
-      border: '#3d4249',
-      fill: '#8fb0c9',
-      mark: '#e7e6e1',
-    },
-  });
-
-  /** @typedef {keyof typeof THEMES.light} ThemeKey */
 
   const READER_STYLES = `
     .sr-button:focus-visible,
@@ -1566,7 +1567,7 @@
       input.step = String(range.step);
       theme(input, type === 'range' ?
           {'accent-color': 'fill'} :
-          {'background': 'surface', 'border-color': 'border', 'color': 'text'});
+          {'background': 'surface', 'border-color': 'muted', 'color': 'text'});
       const value = createElement('span', {
         'font-variant-numeric': 'tabular-nums',
         'min-width': '4.5em',

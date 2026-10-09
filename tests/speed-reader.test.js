@@ -604,6 +604,54 @@ describe('wordFocusTarget', () => {
   });
 });
 
+describe('theme colors', () => {
+  /**
+   * @param {string} hex Color as #rrggbb.
+   * @return {number} Relative luminance (WCAG).
+   */
+  function luminance(hex) {
+    const [r, g, b] = [1, 3, 5]
+        .map((index) => parseInt(hex.slice(index, index + 2), 16) / 255)
+        .map((value) => value <= 0.03928 ?
+            value / 12.92 :
+            ((value + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+
+  /**
+   * @param {string} first
+   * @param {string} second
+   * @return {number} Contrast ratio (WCAG).
+   */
+  function contrast(first, second) {
+    const [light, dark] = [luminance(first), luminance(second)]
+        .sort((a, b) => b - a);
+    return (light + 0.05) / (dark + 0.05);
+  }
+
+  // Foreground, background and minimum ratio: 4.5 for text (words are
+  // shrunk below the size of large text), 3 for the boundary of the input
+  // field and the progress bar (WCAG 1.4.3, 1.4.11).
+  const pairs = [
+    ['text', 'background', 4.5],
+    ['pivot', 'background', 4.5],
+    ['muted', 'background', 4.5],
+    ['mark', 'background', 4.5],
+    ['background', 'text', 4.5],
+    ['text', 'surface', 4.5],
+    ['muted', 'surface', 3],
+    ['fill', 'line', 3],
+  ];
+  for (const [name, colors] of Object.entries(core.themes)) {
+    for (const [foreground, background, minimum] of pairs) {
+      it(`${name}: ${foreground} on ${background}`, () => {
+        const ratio = contrast(colors[foreground], colors[background]);
+        assert.ok(ratio >= minimum, `${ratio.toFixed(2)} < ${minimum}`);
+      });
+    }
+  }
+});
+
 describe('fitWord', () => {
   const {pivotShare, stagePadding} = core.config;
 
