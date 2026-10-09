@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture: table layout of an old page</title>
+</head>
+<body>
+<!-- As on old personal sites: a table for the layout, the text in a font
+     element, paragraphs separated by two line breaks, and the notes in a
+     table inside the font element. Both scripts are loaded. -->
+<table width="100%" cellspacing="0" cellpadding="0">
+  <tr>
+    <td width="120" valign="top"><a href="#home"><img alt="" width="100"
+        height="300"></a></td>
+    <td valign="top">
+      <table width="560" cellspacing="0" cellpadding="0">
+        <tr>
+          <td><font size="2" face="verdana"><b>Old pages</b><br><br>
+            The first paragraph of this essay has no element of its own, and
+            it ends without a period, because its writer, who likes lists,
+            put a line break after every thought, and two of them after every
+            paragraph<br><br>
+            Second paragraph, which starts after two line breaks, is long
+            enough to wrap onto a few lines, with commas, clauses and plenty
+            of words, so that the page has enough text to be read at all.<br><br>
+            The third paragraph closes the essay, again with commas, clauses,
+            and words, before the notes in their table of their own.<br><br>
+            <b>Notes</b><br><br>
+            <table cellspacing="0" cellpadding="0">
+              <tr><td><font size="2">[1] A note in a table of its own.</font></td></tr>
+            </table>
+          </font></td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+<script src="harness.js"></script>
+<script src="../../lib/content-detection.js"></script>
+<script src="../../scripts/reading-ruler.user.js"></script>
+<script src="../../scripts/speed-reader.user.js"></script>
+</body>
+</html>

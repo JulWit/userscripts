@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.4.0
+// @version      1.4.1
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -9,7 +9,7 @@
 // @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiMyYjJmMzYiLz48ZyBmaWxsPSIjOWFhM2FkIj48cmVjdCB4PSI4IiB5PSIxNyIgd2lkdGg9IjQ4IiBoZWlnaHQ9IjIiIHJ4PSIxIiBvcGFjaXR5PSIuNiIvPjxyZWN0IHg9IjgiIHk9IjQ1IiB3aWR0aD0iNDgiIGhlaWdodD0iMiIgcng9IjEiIG9wYWNpdHk9Ii42Ii8+PHJlY3QgeD0iMjYiIHk9IjExIiB3aWR0aD0iMyIgaGVpZ2h0PSI4IiByeD0iMS41Ii8+PHJlY3QgeD0iMjYiIHk9IjQ1IiB3aWR0aD0iMyIgaGVpZ2h0PSI4IiByeD0iMS41Ii8+PHJlY3QgeD0iMTAiIHk9IjI3IiB3aWR0aD0iMTIiIGhlaWdodD0iMTAiIHJ4PSIzIi8+PHJlY3QgeD0iMzMiIHk9IjI3IiB3aWR0aD0iMjEiIGhlaWdodD0iMTAiIHJ4PSIzIi8+PC9nPjxyZWN0IHg9IjIzLjUiIHk9IjI1IiB3aWR0aD0iOCIgaGVpZ2h0PSIxNCIgcng9IjMiIGZpbGw9IiNmZjVhNDUiLz48L3N2Zz4K
 // @updateURL    https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/speed-reader.user.js
 // @downloadURL  https://raw.githubusercontent.com/JulWit/userscripts/main/scripts/speed-reader.user.js
-// @require      https://raw.githubusercontent.com/JulWit/userscripts/main/lib/content-detection.js?v=1.1.0
+// @require      https://raw.githubusercontent.com/JulWit/userscripts/main/lib/content-detection.js?v=1.2.0
 // @match        *://*/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -1028,8 +1028,12 @@
         });
     /** @type {?Element} */
     let box = null;
+    // Line breaks since the last text: two or more (<br><br>) separate
+    // paragraphs on pages that have no paragraph elements.
+    let breaks = 0;
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       if (node.nodeType !== Node.TEXT_NODE) {
+        breaks++;
         parts.push(' ');
         continue;
       }
@@ -1046,7 +1050,10 @@
         flush();
         block = owner;
         box = null;
+      } else if (breaks >= 2) {
+        flush();
       }
+      breaks = 0;
       // Boxes of their own inside a block (a kicker above a title, both in
       // the heading) start new lines: their words are separate too.
       const ownBox = boxOf(text, owner);
