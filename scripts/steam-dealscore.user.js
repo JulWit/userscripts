@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Wishlist – Deal Score
 // @namespace    https://store.steampowered.com/wishlist/dealscore
-// @version      1.13.0
+// @version      1.13.1
 // @description  Deal score (1–100) for the wishlist, cart and store pages, with a top-deals panel on the wishlist
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -214,12 +214,14 @@
 
     // Badge color gradient (continuous between the stops).
     colorStops: [
-      {score: 30, color: '#d9443b'},  // red
+      {score: 30, color: '#de4e44'},  // red
       {score: 55, color: '#e8a530'},  // yellow/orange
       {score: 80, color: '#4fae3f'},  // green
     ],
     // Badge without a score ("…", "–").
     neutralColor: '#3d4450',
+    // Text on the badges: at least 4.5:1 on every color of the gradient.
+    pillTextColor: '#0e1116',
 
     cacheTtlMs: 24 * 60 * 60 * 1000,
     failedRetryAfterMs: 5 * 60 * 1000,
@@ -288,10 +290,11 @@
   // ===========================================================================
 
   /**
-   * Numbers with thousands/decimal separators, including non-breaking spaces.
+   * Numbers with thousands/decimal separators, including non-breaking spaces
+   * (U+00A0, and U+202F, which Steam uses in some currencies).
    * No g flag: only used via matchAll or match.
    */
-  const NUMBER_PATTERN = /\d[\d.,  ']*/;
+  const NUMBER_PATTERN = /\d[\d.,\u00A0\u202F']*/;
 
   /**
    * @param {number} x
@@ -319,7 +322,7 @@
     const match = String(text ?? '').match(NUMBER_PATTERN);
     if (!match) return null;
     const digits =
-        match[0].replace(/[  ']/g, '').replace(/[.,]+$/, '');
+        match[0].replace(/[\u00A0\u202F']/g, '').replace(/[.,]+$/, '');
     const sep = Math.max(digits.lastIndexOf(','), digits.lastIndexOf('.'));
     if (sep >= 0 && digits.length - sep - 1 === 2) {
       const whole = digits.slice(0, sep).replace(/[.,]/g, '');
@@ -2849,7 +2852,7 @@
         text-decoration: none;
         text-transform: none;
         white-space: nowrap;
-        color: #0e1116;
+        color: ${CONFIG.pillTextColor};
         cursor: help;
       }
       .${PREFIX}-pill.${PREFIX}-neutral { color: #c7d5e0; }
@@ -3087,9 +3090,9 @@
         cursor: pointer;
       }
       .${PREFIX}-dialog button:hover { background: #4b5563; }
-      .${PREFIX}-dialog button.${PREFIX}-primary { background: #4c8b2b; }
+      .${PREFIX}-dialog button.${PREFIX}-primary { background: #437a26; }
       .${PREFIX}-dialog button.${PREFIX}-primary:hover {
-        background: #5ba332;
+        background: #478128;
       }
       .${PREFIX}-status {
         min-height: 1.4em;

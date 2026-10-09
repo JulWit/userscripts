@@ -375,13 +375,35 @@ describe('scoreColor', () => {
   const stops = core.config.colorStops;
 
   it('uses the end colors outside the stops', () => {
-    assert.equal(core.scoreColor(1), 'rgb(217, 68, 59)');
+    assert.equal(core.scoreColor(1), 'rgb(222, 78, 68)');
     assert.equal(core.scoreColor(100), 'rgb(79, 174, 63)');
   });
 
   it('interpolates between stops', () => {
     assert.equal(core.scoreColor(stops[1].score), 'rgb(232, 165, 48)');
     assert.notEqual(core.scoreColor(40), core.scoreColor(45));
+  });
+
+  it('keeps the badge text readable on every color (WCAG 1.4.3)', () => {
+    /**
+     * @param {!Array<number>} rgb
+     * @return {number} Relative luminance.
+     */
+    const luminance = (rgb) => {
+      const [r, g, b] = rgb.map((value) => value / 255).map((value) =>
+        value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const hex = core.config.pillTextColor;
+    const text = luminance([1, 3, 5].map(
+        (index) => parseInt(hex.slice(index, index + 2), 16)));
+    for (let score = 1; score <= 100; score++) {
+      const background =
+          luminance(core.scoreColor(score).match(/\d+/g).map(Number));
+      const ratio = (Math.max(text, background) + 0.05) /
+          (Math.min(text, background) + 0.05);
+      assert.ok(ratio >= 4.5, `score ${score}: ${ratio.toFixed(2)}`);
+    }
   });
 });
 
