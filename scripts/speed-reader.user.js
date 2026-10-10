@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speed Reader
 // @namespace    https://github.com/JulWit/userscripts
-// @version      1.6.0
+// @version      1.6.1
 // @description  Shows the text of a page (or the selected text) word by word in a reader overlay on the page (RSVP), with adjustable speed and font size, and can read it aloud
 // @author       Julian
 // @homepageURL  https://github.com/JulWit/userscripts
@@ -35,7 +35,10 @@
  * utterance, with the speed setting as the speech rate. The voice then sets
  * the pace, and the shown word follows its word boundary events; for a
  * voice without them, the usual timing goes on, but waits at the end of
- * each sentence until the voice has finished it.
+ * each sentence until the voice has finished it. A voice that fails, or
+ * does not start in time, is left out: Firefox for Android without voices
+ * (when its text-to-speech engine did not start, for example) keeps an
+ * utterance waiting without any event.
  * The script registers menu commands and a key listener and does nothing
  * else until it is used. The reader is a modal dialog in the top layer with
  * its interface in a closed shadow root, rather than a window of its own,
@@ -190,8 +193,10 @@
     maxResumeRewind: 5,
     // Reading aloud: the speech rate is the speed in words per minute
     // divided by wpmAtRate1 (about what voices speak at rate 1), within the
-    // range of the Web Speech API. Voices may limit it further.
-    speech: {wpmAtRate1: 180, minRate: 0.1, maxRate: 10},
+    // range of the Web Speech API. Voices may limit it further. A voice
+    // that has not started a sentence after startTimeout ms counts as
+    // failed.
+    speech: {wpmAtRate1: 180, minRate: 0.1, maxRate: 10, startTimeout: 3000},
     // Words with more characters are split, at hyphens and slashes first,
     // then into pieces of equal length with a hyphen. A cut may move up to
     // cutWindow characters to fall between a vowel and a consonant.
@@ -2268,7 +2273,13 @@
     reader.speech = speech;
     // Events of an utterance that was stopped may still come.
     const current = () => reader.speech === speech && reader.playing;
+    const startTimer = setTimeout(() => {
+      if (!current()) return;
+      stopSpeech(reader);
+      onSpeechError(reader);
+    }, CONFIG.speech.startTimeout);
     utterance.addEventListener('start', () => {
+      clearTimeout(startTimer);
       if (!current()) return;
       if (reader.speechFailed) {
         reader.speechFailed = false;
@@ -2343,8 +2354,9 @@
 
   /**
    * Goes on without the voice when it fails (if there is none for the
-   * language, for example) and says so at the Read aloud switch. The next
-   * start, move or change of the speed tries the voice again.
+   * language, for example) or does not start in time, and says so at the
+   * Read aloud switch. The next start, move or change of the speed tries
+   * the voice again.
    * @param {!Reader} reader
    */
   function onSpeechError(reader) {

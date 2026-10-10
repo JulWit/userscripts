@@ -92,10 +92,12 @@ async function withPage(name, test, preset = {},
 
 /**
  * How the fake speech synthesis behaves: available false removes speech
- * synthesis from the page, fail makes every utterance fail, and wordMs is
- * the time the voice takes for a word.
+ * synthesis from the page, fail makes every utterance fail, silent keeps
+ * every utterance waiting without any event (as Firefox for Android does
+ * without voices), and wordMs is the time the voice takes for a word.
  * @typedef {{available: (boolean|undefined), fail: (boolean|undefined),
- *     wordMs: (number|undefined)}} SpeechOptions
+ *     silent: (boolean|undefined), wordMs: (number|undefined)}}
+ *     SpeechOptions
  */
 
 /**
@@ -107,7 +109,8 @@ async function withPage(name, test, preset = {},
  * cancel() in window.speechCancels.
  * @param {!SpeechOptions} options
  */
-function fakeSpeech({available = true, fail = false, wordMs = 50}) {
+function fakeSpeech(
+    {available = true, fail = false, silent = false, wordMs = 50}) {
   if (!available) {
     Object.defineProperty(window, 'speechSynthesis',
         {configurable: true, value: undefined});
@@ -146,6 +149,7 @@ function fakeSpeech({available = true, fail = false, wordMs = 50}) {
         later(() => fire(utterance, 'error', {error: 'synthesis-failed'}), 0);
         return;
       }
+      if (silent) return;
       later(() => fire(utterance, 'start'), 0);
       let ms = 0;
       for (const match of utterance.text.matchAll(/\S+/g)) {
@@ -789,6 +793,23 @@ describe('reading aloud', () => {
       assert.equal(await page.textContent('.sr-read-aloud-label'),
           'Read aloud');
     }, {settings: {wpm: 1000, readAloud: true}}, {speech: {fail: true}});
+  });
+
+  it('goes on without a voice that does not start', async () => {
+    await withPage('speed-reader.html', async (page) => {
+      await openReader(page);
+      await page.click('.sr-play');
+      await delay(1000);
+      // Waiting for the voice.
+      assert.equal((await readerState(page)).index, 1);
+      await page.waitForFunction(() =>
+        reader('.sr-read-aloud-label').textContent === 'Read aloud (no voice)');
+      assert.equal(await page.evaluate(() => window.speechCancels), 1);
+      await page.waitForFunction(() => /Word ([3-9]|\d\d+) of/.test(
+          reader('.sr-position').textContent));
+      assert.equal((await readerState(page)).playing, true);
+      await page.click('.sr-play');
+    }, {settings: {wpm: 1000, readAloud: true}}, {speech: {silent: true}});
   });
 
   it('is turned on with the switch, which keeps Space', async () => {
